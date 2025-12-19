@@ -30,12 +30,13 @@ This card is one component of the complete VDA IR Control system:
 
 ### Via HACS (Recommended)
 
-1. Open HACS in Home Assistant
-2. Go to **Frontend** section
-3. Click the three dots menu → **Custom repositories**
-4. Add `https://github.com/vda-solutions/vda-ir-remote-card` as a **Lovelace** type
-5. Click **Install**
-6. Restart Home Assistant
+1. Open HACS
+2. Click ⋮ → **Custom repositories**
+3. Add: `https://github.com/vda-solutions/vda-ir-remote-card`
+4. Type: **Dashboard**
+5. Click **Add**
+6. Download "VDA IR Remote Card"
+7. Hard refresh browser (Ctrl+Shift+R)
 
 ### Manual Installation
 
