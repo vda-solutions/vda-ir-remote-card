@@ -348,30 +348,25 @@ class VDAIRRemoteCard extends HTMLElement {
         .quick-btn.sent {
           background: var(--success-color, #4caf50) !important;
         }
-        .input-label {
-          font-size: 11px;
-          color: var(--secondary-text-color);
-          margin-right: 4px;
-          align-self: center;
-        }
-        .quick-btn.matrix-input {
-          width: 36px;
-          height: 36px;
-          font-size: 12px;
-          font-weight: 600;
-          background: var(--secondary-background-color, #e0e0e0);
+        .matrix-input-select {
+          padding: 8px 12px;
+          font-size: 13px;
+          border: 1px solid var(--divider-color, #ccc);
+          border-radius: 8px;
+          background: var(--card-background-color, white);
           color: var(--primary-text-color);
-          border: 2px solid transparent;
+          cursor: pointer;
+          min-width: 140px;
+          appearance: none;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+          background-repeat: no-repeat;
+          background-position: right 10px center;
+          padding-right: 30px;
         }
-        .quick-btn.matrix-input:hover {
-          background: var(--primary-color);
-          color: white;
-        }
-        .quick-btn.matrix-input.selected {
-          background: var(--primary-color);
-          color: white;
-          border-color: white;
-          box-shadow: 0 0 0 2px var(--primary-color);
+        .matrix-input-select:focus {
+          outline: none;
+          border-color: var(--primary-color);
+          box-shadow: 0 0 0 2px rgba(var(--rgb-primary-color, 33, 150, 243), 0.2);
         }
 
         /* Modal Popup */
@@ -626,20 +621,21 @@ class VDAIRRemoteCard extends HTMLElement {
 
             <div class="quick-buttons">
               ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
-                <!-- Power button + Matrix inputs when linked to matrix -->
+                <!-- Power button + Matrix input dropdown when linked to matrix -->
                 ${this._commands.includes('power') ? `
                   <button class="quick-btn power ${this._lastSent === 'power' ? 'sent' : ''}"
                           data-command="power" title="Power">
                     ${this._getCommandIcon('power')}
                   </button>
                 ` : ''}
-                <span class="input-label">Inputs:</span>
-                ${this._matrixInputCommands.map(cmd => `
-                  <button class="quick-btn matrix-input ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}"
-                          data-matrix-command="${cmd.command_id}" title="${this._getMatrixInputDisplayName(cmd)}">
-                    ${cmd.input_value || cmd.command_id.replace('route_input_', '')}
-                  </button>
-                `).join('')}
+                <select class="matrix-input-select" id="matrix-input-dropdown">
+                  <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Select Input</option>
+                  ${this._matrixInputCommands.map(cmd => `
+                    <option value="${cmd.command_id}" ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}>
+                      ${this._getMatrixInputDisplayName(cmd)}
+                    </option>
+                  `).join('')}
+                </select>
               ` : `
                 <!-- Normal quick buttons -->
                 ${quickButtons.map(cmd => `
@@ -726,13 +722,24 @@ class VDAIRRemoteCard extends HTMLElement {
         }
       });
 
-      // Matrix input buttons
+      // Matrix input buttons (in modal)
       this.shadowRoot.querySelectorAll('[data-matrix-command]').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           this._sendMatrixCommand(btn.dataset.matrixCommand);
         });
       });
+
+      // Matrix input dropdown (in compact view)
+      const matrixDropdown = this.shadowRoot.getElementById('matrix-input-dropdown');
+      if (matrixDropdown) {
+        matrixDropdown.addEventListener('change', (e) => {
+          const commandId = e.target.value;
+          if (commandId) {
+            this._sendMatrixCommand(commandId);
+          }
+        });
+      }
     }
   }
 
