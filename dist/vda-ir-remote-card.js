@@ -1060,6 +1060,7 @@ class VDAIRRemoteCard extends HTMLElement {
           device_id: matrixId,
           payload: rawCommand,
           format: 'text',
+          line_ending: 'cr',
           wait_for_response: false,
         });
       } else {
