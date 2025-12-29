@@ -1105,7 +1105,7 @@ class VDAIRRemoteCard extends HTMLElement {
               <div class="vol-group">
                 <div class="section-label">Vol</div>
                 ${volCmds.includes('volume_up') ? `<button class="btn" data-command="volume_up">+</button>` : ''}
-                ${volCmds.includes('mute') ? `<button class="btn" data-command="mute">🔇</button>` : ''}
+                ${volCmds.includes('mute') ? `<button class="btn" data-command="mute"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg></button>` : ''}
                 ${volCmds.includes('volume_down') ? `<button class="btn" data-command="volume_down">−</button>` : ''}
               </div>
             ` : ''}
@@ -1132,7 +1132,21 @@ class VDAIRRemoteCard extends HTMLElement {
         </div>
       ` : ''}
 
-      <!-- Inputs - Show matrix inputs if linked to matrix, otherwise show IR input commands -->
+      <!-- Playback -->
+      ${playCmds.length > 0 ? `
+        <div class="remote-section">
+          <div class="playback-row">
+            ${playCmds.includes('rewind') ? `<button class="btn" data-command="rewind"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg></button>` : ''}
+            ${playCmds.includes('play') ? `<button class="btn" data-command="play"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>` : ''}
+            ${playCmds.includes('play_pause') ? `<button class="btn" data-command="play_pause"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>` : ''}
+            ${playCmds.includes('pause') ? `<button class="btn" data-command="pause"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></button>` : ''}
+            ${playCmds.includes('stop') ? `<button class="btn" data-command="stop"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 6h12v12H6z"/></svg></button>` : ''}
+            ${playCmds.includes('fast_forward') ? `<button class="btn" data-command="fast_forward"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg></button>` : ''}
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Inputs - Always at bottom. Show matrix inputs if linked to matrix, otherwise show IR input commands -->
       ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
         <div class="remote-section matrix-input-section">
           <div class="section-label">Inputs</div>
@@ -1152,20 +1166,6 @@ class VDAIRRemoteCard extends HTMLElement {
             ${inputCmds.map(cmd => `
               <button class="btn" data-command="${cmd}">${this._formatCommand(cmd)}</button>
             `).join('')}
-          </div>
-        </div>
-      ` : ''}
-
-      <!-- Playback -->
-      ${playCmds.length > 0 ? `
-        <div class="remote-section">
-          <div class="playback-row">
-            ${playCmds.includes('rewind') ? `<button class="btn" data-command="rewind">⏪</button>` : ''}
-            ${playCmds.includes('play') ? `<button class="btn" data-command="play">▶</button>` : ''}
-            ${playCmds.includes('play_pause') ? `<button class="btn" data-command="play_pause">⏯</button>` : ''}
-            ${playCmds.includes('pause') ? `<button class="btn" data-command="pause">⏸</button>` : ''}
-            ${playCmds.includes('stop') ? `<button class="btn" data-command="stop">⏹</button>` : ''}
-            ${playCmds.includes('fast_forward') ? `<button class="btn" data-command="fast_forward">⏩</button>` : ''}
           </div>
         </div>
       ` : ''}
