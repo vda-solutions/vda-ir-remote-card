@@ -26,6 +26,9 @@ class VDAIRRemoteCard extends HTMLElement {
     this._isDeviceGroup = false;
     this._deviceGroup = null;
     this._groupMemberDevices = [];
+    // HA Devices
+    this._haDevices = [];
+    this._sourceIsHADevice = false;
   }
 
   set hass(hass) {
@@ -202,6 +205,20 @@ class VDAIRRemoteCard extends HTMLElement {
         this._allDevices = devicesData.devices || [];
       }
 
+      // Also load HA devices (for matrix source device lookup)
+      try {
+        const haDevicesResp = await fetch('/api/vda_ir_control/ha_devices', {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        });
+        if (haDevicesResp.ok) {
+          const haData = await haDevicesResp.json();
+          this._haDevices = haData.devices || [];
+        }
+      } catch (e) {
+        console.error('Failed to load HA devices:', e);
+        this._haDevices = [];
+      }
+
       // Query current matrix routing state
       if (this._matrixDevice && this._device.matrix_port) {
         await this._queryMatrixRouting();
@@ -329,6 +346,7 @@ class VDAIRRemoteCard extends HTMLElement {
     // Load the device assigned to the currently selected matrix input
     this._sourceDevice = null;
     this._sourceCommands = [];
+    this._sourceIsHADevice = false;
 
     if (!this._matrixDevice || !this._selectedMatrixInput) return;
 
@@ -343,11 +361,36 @@ class VDAIRRemoteCard extends HTMLElement {
     const matrixInput = matrixInputs.find(i => String(i.index) === String(inputIndex));
     if (!matrixInput || !matrixInput.device_id) return;
 
-    // Find the device in our cached devices
+    // First check if this is an HA device
+    const haDevice = this._haDevices.find(d => d.device_id === matrixInput.device_id);
+    if (haDevice) {
+      this._sourceDevice = haDevice;
+      this._sourceIsHADevice = true;
+
+      // Load commands for this HA device family
+      try {
+        const resp = await fetch(`/api/vda_ir_control/ha_devices/${haDevice.device_id}/commands`, {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this._sourceCommands = data.commands || [];
+          this._sourceDeviceType = haDevice.device_family;
+        }
+      } catch (e) {
+        console.error('Failed to load HA device commands:', e);
+        // Fallback: use common commands based on device family
+        this._sourceCommands = ['up', 'down', 'left', 'right', 'select', 'menu', 'home', 'back', 'play_pause', 'power'];
+      }
+      return;
+    }
+
+    // Find the device in our cached IR devices
     const sourceDevice = this._allDevices.find(d => d.device_id === matrixInput.device_id);
     if (!sourceDevice) return;
 
     this._sourceDevice = sourceDevice;
+    this._sourceIsHADevice = false;
 
     // Load the source device's commands from its profile
     const profileId = sourceDevice.device_profile_id;
@@ -1504,10 +1547,22 @@ class VDAIRRemoteCard extends HTMLElement {
     this._lastSendTime = now;
 
     try {
-      await this._hass.callService('vda_ir_control', 'send_command', {
-        device_id: deviceId,
-        command: command,
-      });
+      // Check if this is an HA device
+      const isHADevice = this._sourceIsHADevice && this._sourceDevice?.device_id === deviceId;
+
+      if (isHADevice) {
+        // Use HA command service for HA devices
+        await this._hass.callService('vda_ir_control', 'send_ha_command', {
+          device_id: deviceId,
+          command: command,
+        });
+      } else {
+        // Use regular IR command service
+        await this._hass.callService('vda_ir_control', 'send_command', {
+          device_id: deviceId,
+          command: command,
+        });
+      }
 
       this._lastSent = command;
       this._render();
