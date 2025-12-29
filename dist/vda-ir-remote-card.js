@@ -135,13 +135,16 @@ class VDAIRRemoteCard extends HTMLElement {
         // If no pre-defined input commands, generate from matrix_inputs
         if (inputCommands.length === 0) {
           const matrixInputs = this._matrixDevice.matrix_inputs || [];
-          inputCommands = matrixInputs.map(input => ({
-            command_id: `route_input_${input.index}`,
-            name: input.name || `Input ${input.index}`,
-            input_value: String(input.index),
-            device_id: input.device_id,  // May have a linked source device
-            _generated: true
-          }));
+          // Filter out disabled inputs
+          inputCommands = matrixInputs
+            .filter(input => input.enabled !== false)
+            .map(input => ({
+              command_id: `route_input_${input.index}`,
+              name: input.name || `Input ${input.index}`,
+              input_value: String(input.index),
+              device_id: input.device_id,  // May have a linked source device
+              _generated: true
+            }));
         }
 
         this._matrixInputCommands = inputCommands;
