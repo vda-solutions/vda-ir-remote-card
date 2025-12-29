@@ -348,6 +348,25 @@ class VDAIRRemoteCard extends HTMLElement {
         .quick-btn.sent {
           background: var(--success-color, #4caf50) !important;
         }
+        .quick-btn.matrix-input {
+          width: 36px;
+          height: 36px;
+          font-size: 12px;
+          font-weight: 600;
+          background: var(--secondary-background-color, #e0e0e0);
+          color: var(--primary-text-color);
+          border: 2px solid transparent;
+        }
+        .quick-btn.matrix-input:hover {
+          background: var(--primary-color);
+          color: white;
+        }
+        .quick-btn.matrix-input.selected {
+          background: var(--primary-color);
+          color: white;
+          border-color: white;
+          box-shadow: 0 0 0 2px var(--primary-color);
+        }
 
         /* Modal Popup */
         .modal-overlay {
@@ -600,12 +619,29 @@ class VDAIRRemoteCard extends HTMLElement {
             </div>
 
             <div class="quick-buttons">
-              ${quickButtons.map(cmd => `
-                <button class="quick-btn ${cmd.includes('power') ? 'power' : ''} ${this._lastSent === cmd ? 'sent' : ''}"
-                        data-command="${cmd}" title="${this._formatCommand(cmd)}">
-                  ${this._getCommandIcon(cmd)}
-                </button>
-              `).join('')}
+              ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
+                <!-- Power button + Matrix inputs when linked to matrix -->
+                ${this._commands.includes('power') ? `
+                  <button class="quick-btn power ${this._lastSent === 'power' ? 'sent' : ''}"
+                          data-command="power" title="Power">
+                    ${this._getCommandIcon('power')}
+                  </button>
+                ` : ''}
+                ${this._matrixInputCommands.map(cmd => `
+                  <button class="quick-btn matrix-input ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}"
+                          data-matrix-command="${cmd.command_id}" title="${this._getMatrixInputDisplayName(cmd)}">
+                    ${cmd.input_value || cmd.command_id.replace('route_input_', '')}
+                  </button>
+                `).join('')}
+              ` : `
+                <!-- Normal quick buttons -->
+                ${quickButtons.map(cmd => `
+                  <button class="quick-btn ${cmd.includes('power') ? 'power' : ''} ${this._lastSent === cmd ? 'sent' : ''}"
+                          data-command="${cmd}" title="${this._formatCommand(cmd)}">
+                    ${this._getCommandIcon(cmd)}
+                  </button>
+                `).join('')}
+              `}
             </div>
           </div>
 
