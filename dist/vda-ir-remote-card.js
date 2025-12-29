@@ -151,10 +151,60 @@ class VDAIRRemoteCard extends HTMLElement {
         const devicesData = await devicesResp.json();
         this._allDevices = devicesData.devices || [];
       }
+
+      // Query current matrix routing state
+      if (this._matrixDevice && this._device.matrix_port) {
+        await this._queryMatrixRouting();
+      }
     } catch (e) {
       console.error('Failed to load matrix device:', e);
       this._matrixDevice = null;
       this._matrixInputCommands = [];
+    }
+  }
+
+  async _queryMatrixRouting() {
+    // Query the matrix for current routing: r av out Y!
+    // Response format: "input X -> output Y" or similar
+    if (!this._matrixDevice || !this._device.matrix_port) return;
+
+    const matrixType = this._device.matrix_device_type;
+    if (matrixType !== 'serial') return; // Only serial matrices for now
+
+    const outputNum = this._device.matrix_port;
+    const queryCmd = `r av out ${outputNum}!`;
+
+    try {
+      const result = await this._hass.callService('vda_ir_control', 'send_raw_serial_command', {
+        device_id: this._device.matrix_device_id,
+        payload: queryCmd,
+        format: 'text',
+        line_ending: 'cr',
+        wait_for_response: true,
+        timeout: 2.0,
+      }, { return_response: true });
+
+      console.log('Matrix routing query response:', result);
+
+      // Parse response to extract input number
+      // Expected format: "input X -> output Y" or "X"
+      if (result && result.response) {
+        const response = result.response.response || result.response;
+        const inputMatch = response.match(/input\s*(\d+)/i) || response.match(/^(\d+)/);
+        if (inputMatch) {
+          const inputNum = inputMatch[1];
+          // Find the corresponding command
+          const matchingCmd = this._matrixInputCommands.find(cmd =>
+            cmd.input_value === inputNum || cmd.input_value === String(inputNum)
+          );
+          if (matchingCmd) {
+            this._selectedMatrixInput = matchingCmd.command_id;
+            console.log('Set selected matrix input to:', this._selectedMatrixInput);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to query matrix routing:', e);
     }
   }
 
