@@ -167,15 +167,22 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   async _queryMatrixRouting() {
-    // Query the matrix for current routing: r av out Y!
-    // Response format: "input X -> output Y" or similar
+    // Query the matrix for current routing using configured template
     if (!this._matrixDevice || !this._device.matrix_port) return;
 
     const matrixType = this._device.matrix_device_type;
     if (matrixType !== 'serial') return; // Only serial matrices for now
 
+    // Use query template if configured, otherwise skip
+    const queryTemplate = this._matrixDevice.query_template;
+    if (!queryTemplate) {
+      console.log('No query template configured for matrix');
+      return;
+    }
+
     const outputNum = this._device.matrix_port;
-    const queryCmd = `r av out ${outputNum}!`;
+    const queryCmd = queryTemplate.replace('{output}', outputNum);
+    console.log('Matrix query command:', queryCmd);
 
     try {
       // Use REST API to get response
@@ -199,12 +206,23 @@ class VDAIRRemoteCard extends HTMLElement {
         console.log('Matrix routing query response:', result);
 
         // Parse response to extract input number
-        // Expected format: "input X -> output Y" or just "X"
+        // OREI format: "av outY inX" or "input X -> output Y" or just "X"
         if (result && result.response) {
-          const response = String(result.response);
-          const inputMatch = response.match(/input\s*(\d+)/i) || response.match(/(\d+)/);
+          const response = String(result.response).trim();
+          console.log('Parsing matrix response:', response);
+
+          // Try OREI format first: "av out1 in3" -> input is 3
+          let inputMatch = response.match(/in(\d+)/i);
+          // Try "input X" format
+          if (!inputMatch) inputMatch = response.match(/input\s*(\d+)/i);
+          // Try just a number at the end
+          if (!inputMatch) inputMatch = response.match(/(\d+)\s*$/);
+          // Try any number
+          if (!inputMatch) inputMatch = response.match(/(\d+)/);
+
           if (inputMatch) {
             const inputNum = inputMatch[1];
+            console.log('Extracted input number:', inputNum);
             // Find the corresponding command
             const matchingCmd = this._matrixInputCommands.find(cmd =>
               cmd.input_value === inputNum || cmd.input_value === String(inputNum)
@@ -212,7 +230,13 @@ class VDAIRRemoteCard extends HTMLElement {
             if (matchingCmd) {
               this._selectedMatrixInput = matchingCmd.command_id;
               console.log('Set selected matrix input to:', this._selectedMatrixInput);
+              // Re-render to update the dropdown
+              this._render();
+            } else {
+              console.log('No matching command found for input:', inputNum, 'Available:', this._matrixInputCommands.map(c => c.input_value));
             }
+          } else {
+            console.log('Could not parse input number from response');
           }
         }
       }
