@@ -1049,11 +1049,19 @@ class VDAIRRemoteCard extends HTMLElement {
       const cmd = this._matrixInputCommands.find(c => c.command_id === commandId);
 
       if (cmd && cmd._generated && matrixType === 'serial') {
-        // Generated command for serial matrix - send raw routing command
-        // OREI format: s in X av out Y!
+        // Generated command for serial matrix - use routing template
+        const template = this._matrixDevice.routing_template;
+        if (!template) {
+          console.error('No routing template configured for matrix');
+          return;
+        }
+
         const inputNum = cmd.input_value;
         const outputNum = this._device.matrix_port;
-        const rawCommand = `s in ${inputNum} av out ${outputNum}!`;
+        // Replace placeholders in template
+        const rawCommand = template
+          .replace('{input}', inputNum)
+          .replace('{output}', outputNum);
 
         console.log('Sending matrix routing command:', rawCommand);
         await this._hass.callService('vda_ir_control', 'send_raw_serial_command', {
