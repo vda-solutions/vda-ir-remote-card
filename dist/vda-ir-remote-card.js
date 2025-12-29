@@ -22,6 +22,10 @@ class VDAIRRemoteCard extends HTMLElement {
     // Source device (the device on the selected matrix input)
     this._sourceDevice = null;
     this._sourceCommands = [];
+    // Device groups
+    this._isDeviceGroup = false;
+    this._deviceGroup = null;
+    this._groupMemberDevices = [];
   }
 
   set hass(hass) {
@@ -61,20 +65,63 @@ class VDAIRRemoteCard extends HTMLElement {
     if (!this._hass || !this._config.device_id) return;
 
     try {
-      // Fetch device info from API
+      // First check if this is a device group
+      const groupsResp = await fetch('/api/vda_ir_control/device_groups', {
+        headers: {
+          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+        },
+      });
+
+      if (groupsResp.ok) {
+        const groupsData = await groupsResp.json();
+        this._deviceGroup = (groupsData.groups || []).find(g => g.group_id === this._config.device_id);
+        this._isDeviceGroup = !!this._deviceGroup;
+      }
+
+      // Fetch all devices from API (needed for both regular devices and group member info)
       const devicesResp = await fetch('/api/vda_ir_control/devices', {
         headers: {
           'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
         },
       });
 
+      let allDevices = [];
       if (devicesResp.ok) {
         const data = await devicesResp.json();
-        this._device = data.devices.find(d => d.device_id === this._config.device_id);
+        allDevices = data.devices || [];
+        if (!this._isDeviceGroup) {
+          this._device = allDevices.find(d => d.device_id === this._config.device_id);
+        }
       }
 
-      // Get commands from profile
-      if (this._device) {
+      // Also fetch serial devices for group members
+      let serialDevices = [];
+      const serialResp = await fetch('/api/vda_ir_control/serial_devices', {
+        headers: {
+          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+        },
+      });
+      if (serialResp.ok) {
+        const serialData = await serialResp.json();
+        serialDevices = serialData.devices || [];
+      }
+
+      // If this is a device group, load member device info
+      if (this._isDeviceGroup && this._deviceGroup.members) {
+        this._groupMemberDevices = this._deviceGroup.members.map(member => {
+          if (member.device_type === 'controlled') {
+            const device = allDevices.find(d => d.device_id === member.device_id);
+            return device ? { ...device, member_type: 'controlled' } : null;
+          } else if (member.device_type === 'serial') {
+            const device = serialDevices.find(d => d.device_id === member.device_id);
+            return device ? { ...device, member_type: 'serial' } : null;
+          }
+          return null;
+        }).filter(d => d !== null);
+      }
+
+      // Get commands from profile (only for regular devices)
+      if (this._device && !this._isDeviceGroup) {
         await this._loadCommands();
         // Load matrix device if linked
         await this._loadMatrixDevice();
@@ -402,7 +449,7 @@ class VDAIRRemoteCard extends HTMLElement {
           overflow: visible;
         }
         .card-content {
-          padding: 12px;
+          padding: 24px 16px 16px 16px;
         }
         .card-header {
           display: flex;
@@ -411,7 +458,14 @@ class VDAIRRemoteCard extends HTMLElement {
           margin-bottom: 10px;
         }
         .device-icon {
-          font-size: 20px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .device-icon svg {
+          width: 24px;
+          height: 24px;
+          fill: currentColor;
         }
         .device-name {
           font-size: 14px;
@@ -772,10 +826,100 @@ class VDAIRRemoteCard extends HTMLElement {
           color: var(--secondary-text-color);
           font-size: 13px;
         }
+        .group-card {
+          padding: 24px 16px 16px 16px;
+        }
+        .group-header {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .group-icon {
+          display: flex;
+          align-items: center;
+        }
+        .group-icon svg {
+          width: 20px;
+          height: 20px;
+          fill: currentColor;
+        }
+        .group-name {
+          font-size: 14px;
+          font-weight: 500;
+          color: var(--primary-text-color);
+        }
+        .group-members-inline {
+          font-size: 11px;
+          color: var(--secondary-text-color);
+        }
+        .group-power-btn-small {
+          width: 44px;
+          height: 44px;
+          border-radius: 50%;
+          border: none;
+          background: var(--error-color, #f44336);
+          color: white;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 18px;
+          transition: all 0.2s;
+        }
+        .group-power-btn-small:hover {
+          transform: scale(1.1);
+          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .group-power-btn-small.sending {
+          animation: pulse 0.5s infinite;
+        }
+        @keyframes pulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.1); }
+        }
+        .group-status {
+          font-size: 11px;
+          text-align: center;
+          margin-top: 8px;
+          padding: 6px;
+          border-radius: 6px;
+          background: var(--secondary-background-color);
+        }
+        .quick-btn.compact {
+          width: 36px;
+          height: 36px;
+          margin-right: 6px;
+        }
+        .quick-btn.compact svg {
+          width: 16px;
+          height: 16px;
+        }
+        .matrix-input-select.compact {
+          padding: 6px 8px;
+          font-size: 12px;
+          margin-right: 6px;
+          max-width: 100px;
+        }
       </style>
 
       <ha-card>
-        ${this._device ? `
+        ${this._isDeviceGroup && this._deviceGroup ? `
+          <div class="group-card">
+            <div class="group-header">
+              <span class="group-icon"><svg viewBox="0 0 24 24"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg></span>
+              <div style="flex:1">
+                <div class="group-name">${this._config.name || this._deviceGroup.name}</div>
+                <div class="group-members-inline">${this._groupMemberDevices.length} device${this._groupMemberDevices.length !== 1 ? 's' : ''}</div>
+              </div>
+              <button class="group-power-btn-small ${this._isSendingGroupPower ? 'sending' : ''}" id="group-power-btn" title="Power All Devices">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg>
+              </button>
+            </div>
+            ${this._groupPowerStatus ? `
+              <div class="group-status">${this._groupPowerStatus}</div>
+            ` : ''}
+          </div>
+        ` : this._device ? `
           <div class="card-content">
             <div class="card-header">
               <span class="device-icon">${deviceIcon}</span>
@@ -783,20 +927,15 @@ class VDAIRRemoteCard extends HTMLElement {
                 <div class="device-name">${deviceName}</div>
                 ${this._device.location ? `<div class="device-location">${this._device.location}</div>` : ''}
               </div>
-              <button class="expand-btn" id="open-remote">Remote</button>
-            </div>
-
-            <div class="quick-buttons">
               ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
-                <!-- Power button + Matrix input dropdown when linked to matrix -->
                 ${this._commands.includes('power') ? `
-                  <button class="quick-btn power ${this._lastSent === 'power' ? 'sent' : ''}"
+                  <button class="quick-btn power compact ${this._lastSent === 'power' ? 'sent' : ''}"
                           data-command="power" title="Power">
                     ${this._getCommandIcon('power')}
                   </button>
                 ` : ''}
-                <select class="matrix-input-select" id="matrix-input-dropdown">
-                  <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Select Input</option>
+                <select class="matrix-input-select compact" id="matrix-input-dropdown">
+                  <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
                   ${this._matrixInputCommands.map(cmd => `
                     <option value="${cmd.command_id}" ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}>
                       ${this._getMatrixInputDisplayName(cmd)}
@@ -804,46 +943,53 @@ class VDAIRRemoteCard extends HTMLElement {
                   `).join('')}
                 </select>
               ` : `
-                <!-- Normal quick buttons -->
                 ${quickButtons.map(cmd => `
-                  <button class="quick-btn ${cmd.includes('power') ? 'power' : ''} ${this._lastSent === cmd ? 'sent' : ''}"
+                  <button class="quick-btn compact ${cmd.includes('power') ? 'power' : ''} ${this._lastSent === cmd ? 'sent' : ''}"
                           data-command="${cmd}" title="${this._formatCommand(cmd)}">
                     ${this._getCommandIcon(cmd)}
                   </button>
                 `).join('')}
               `}
+              <button class="expand-btn" id="open-remote">Remote</button>
             </div>
-          </div>
 
-          ${this._showRemote ? `
-            <div class="modal-overlay" id="modal-overlay">
-              <div class="modal" onclick="event.stopPropagation()">
-                <div class="modal-header">
-                  <span class="modal-title">${this._sourceDevice ? `${deviceName} → ${this._sourceDevice.name}` : deviceName}</span>
-                  <button class="close-btn" id="close-modal">✕</button>
-                </div>
-
-                <div class="toast-container">
-                  <div class="sent-toast ${this._lastSent ? 'visible' : ''}">
-                    <div class="toast-fill" style="width: ${this._lastSent === 'volume_up' ? '25%' : '100%'}"></div>
-                    <span class="toast-text">${this._lastSent ? this._formatCommand(this._lastSent) : ''}</span>
+            ${this._showRemote ? `
+              <div class="modal-overlay" id="modal-overlay">
+                <div class="modal" onclick="event.stopPropagation()">
+                  <div class="modal-header">
+                    <span class="modal-title">${this._sourceDevice ? `${deviceName} → ${this._sourceDevice.name}` : deviceName}</span>
+                    <button class="close-btn" id="close-modal">✕</button>
                   </div>
-                </div>
 
-                ${this._renderRemoteContent()}
+                  <div class="toast-container">
+                    <div class="sent-toast ${this._lastSent ? 'visible' : ''}">
+                      <div class="toast-fill" style="width: ${this._lastSent === 'volume_up' ? '25%' : '100%'}"></div>
+                      <span class="toast-text">${this._lastSent ? this._formatCommand(this._lastSent) : ''}</span>
+                    </div>
+                  </div>
+
+                  ${this._renderRemoteContent()}
+                </div>
               </div>
-            </div>
-          ` : ''}
+            ` : ''}
+          </div>
         ` : `
           <div class="not-found">
-            Device not found: ${this._config.device_id}<br>
+            Device or group not found: ${this._config.device_id}<br>
             <small>Create it in the VDA IR Control admin card.</small>
           </div>
         `}
       </ha-card>
     `;
 
-    // Add event listeners
+    // Add event listeners for device groups
+    if (this._isDeviceGroup && this._deviceGroup) {
+      this.shadowRoot.getElementById('group-power-btn')?.addEventListener('click', () => {
+        this._sendGroupPowerCommand();
+      });
+    }
+
+    // Add event listeners for regular devices
     if (this._device) {
       this.shadowRoot.getElementById('open-remote')?.addEventListener('click', async () => {
         // If linked to matrix, load the source device's commands
@@ -1138,12 +1284,12 @@ class VDAIRRemoteCard extends HTMLElement {
         <div class="remote-section">
           <div class="power-row dual-power">
             <button class="btn power tv-power" data-command="power" data-device-id="${this._device.device_id}">
-              <span class="power-icon">⏻</span>
+              <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
               <span class="power-label">TV</span>
             </button>
             ${powerCmds.includes('power') ? `
               <button class="btn power source-power" data-command="power" data-source="true">
-                <span class="power-icon">⏻</span>
+                <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
                 <span class="power-label">${this._sourceDevice.name.substring(0, 8)}</span>
               </button>
             ` : ''}
@@ -1154,7 +1300,7 @@ class VDAIRRemoteCard extends HTMLElement {
           <div class="power-row">
             ${powerCmds.map(cmd => `
               <button class="btn power" data-command="${cmd}">
-                ${cmd === 'power' ? '⏻' : cmd === 'power_on' ? 'On' : cmd === 'power_off' ? 'Off' : this._formatCommand(cmd)}
+                ${cmd === 'power' ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg>' : cmd === 'power_on' ? 'On' : cmd === 'power_off' ? 'Off' : this._formatCommand(cmd)}
               </button>
             `).join('')}
           </div>
@@ -1167,13 +1313,13 @@ class VDAIRRemoteCard extends HTMLElement {
         <div class="remote-section">
           <div class="dpad">
             <div></div>
-            ${navCmds.includes('up') ? `<button class="btn" data-command="up">▲</button>` : '<div></div>'}
+            ${navCmds.includes('up') ? `<button class="btn" data-command="up"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>` : '<div></div>'}
             <div></div>
-            ${navCmds.includes('left') ? `<button class="btn" data-command="left">◀</button>` : '<div></div>'}
+            ${navCmds.includes('left') ? `<button class="btn" data-command="left"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></button>` : '<div></div>'}
             ${navCmds.includes('select') || navCmds.includes('enter') ? `<button class="btn ok" data-command="${navCmds.includes('select') ? 'select' : 'enter'}">OK</button>` : '<div></div>'}
-            ${navCmds.includes('right') ? `<button class="btn" data-command="right">▶</button>` : '<div></div>'}
+            ${navCmds.includes('right') ? `<button class="btn" data-command="right"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></button>` : '<div></div>'}
             <div></div>
-            ${navCmds.includes('down') ? `<button class="btn" data-command="down">▼</button>` : '<div></div>'}
+            ${navCmds.includes('down') ? `<button class="btn" data-command="down"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>` : '<div></div>'}
             <div></div>
           </div>
           <div class="nav-row">
@@ -1199,8 +1345,8 @@ class VDAIRRemoteCard extends HTMLElement {
             ${chanCmds.length > 0 ? `
               <div class="chan-group">
                 <div class="section-label">Ch</div>
-                ${chanCmds.includes('channel_up') ? `<button class="btn" data-command="channel_up">▲</button>` : ''}
-                ${chanCmds.includes('channel_down') ? `<button class="btn" data-command="channel_down">▼</button>` : ''}
+                ${chanCmds.includes('channel_up') ? `<button class="btn" data-command="channel_up"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>` : ''}
+                ${chanCmds.includes('channel_down') ? `<button class="btn" data-command="channel_down"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>` : ''}
               </div>
             ` : ''}
           </div>
@@ -1288,6 +1434,63 @@ class VDAIRRemoteCard extends HTMLElement {
     } catch (e) {
       console.error('Failed to send command:', e);
     }
+  }
+
+  async _sendGroupPowerCommand() {
+    if (!this._deviceGroup || !this._groupMemberDevices.length) return;
+
+    this._isSendingGroupPower = true;
+    this._groupPowerStatus = 'Sending power commands...';
+    this._render();
+
+    const delay = this._deviceGroup.sequence_delay_ms || 20;
+    let successCount = 0;
+
+    for (let i = 0; i < this._groupMemberDevices.length; i++) {
+      const member = this._groupMemberDevices[i];
+      this._groupPowerStatus = `Sending to ${member.name} (${i + 1}/${this._groupMemberDevices.length})`;
+      this._render();
+
+      try {
+        if (member.member_type === 'controlled') {
+          // IR device - send power command
+          await this._hass.callService('vda_ir_control', 'send_command', {
+            device_id: member.device_id,
+            command: 'power',
+          });
+          successCount++;
+        } else if (member.member_type === 'serial') {
+          // Serial device - find and send power command
+          const powerCmd = Object.entries(member.commands || {}).find(([id, cmd]) =>
+            id === 'power' || cmd.name?.toLowerCase() === 'power'
+          );
+          if (powerCmd) {
+            await this._hass.callService('vda_ir_control', 'send_serial_command', {
+              device_id: member.device_id,
+              command_id: powerCmd[0],
+            });
+            successCount++;
+          }
+        }
+      } catch (e) {
+        console.error(`Failed to send power to ${member.name}:`, e);
+      }
+
+      // Wait for delay before next device (except for last one)
+      if (i < this._groupMemberDevices.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    this._isSendingGroupPower = false;
+    this._groupPowerStatus = `Sent to ${successCount}/${this._groupMemberDevices.length} devices`;
+    this._render();
+
+    // Clear status after 3 seconds
+    setTimeout(() => {
+      this._groupPowerStatus = null;
+      this._render();
+    }, 3000);
   }
 
   async _sendCommandToDevice(command, deviceId) {
@@ -1434,14 +1637,14 @@ class VDAIRRemoteCard extends HTMLElement {
 
   _getDeviceIcon() {
     const icons = {
-      tv: '📺',
-      cable_box: '📦',
-      soundbar: '🔊',
-      streaming: '📡',
-      audio_receiver: '🎵',
-      projector: '🎬',
+      tv: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 1.99-.9 1.99-2L23 5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>`,
+      cable_box: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 6H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H4V8h16v8zM6 10h2v4H6zm3.5 0h2v4h-2zm3.5 0h2v4h-2z"/></svg>`,
+      soundbar: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`,
+      streaming: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zM9 8l7 4-7 4V8z"/></svg>`,
+      audio_receiver: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>`,
+      projector: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M22 7v10c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V7c0-1.1.9-2 2-2h16c1.1 0 2 .9 2 2zM4 17h16V7H4v10zm10-5c0-1.66-1.34-3-3-3s-3 1.34-3 3 1.34 3 3 3 3-1.34 3-3zm5-2h2v2h-2z"/></svg>`,
     };
-    return icons[this._deviceType] || '📺';
+    return icons[this._deviceType] || icons.tv;
   }
 
   getCardSize() {
@@ -1456,6 +1659,8 @@ class VDAIRRemoteCardEditor extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._config = {};
     this._devices = [];
+    this._deviceGroups = [];
+    this._availableCommands = [];
   }
 
   set hass(hass) {
@@ -1465,6 +1670,7 @@ class VDAIRRemoteCardEditor extends HTMLElement {
 
   setConfig(config) {
     this._config = config;
+    this._loadAvailableCommands();
     this._render();
   }
 
@@ -1472,18 +1678,76 @@ class VDAIRRemoteCardEditor extends HTMLElement {
     if (!this._hass) return;
 
     try {
-      const resp = await fetch('/api/vda_ir_control/devices', {
+      // Load devices
+      const devicesResp = await fetch('/api/vda_ir_control/devices', {
+        headers: {
+          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+        },
+      });
+      if (devicesResp.ok) {
+        const data = await devicesResp.json();
+        this._devices = data.devices || [];
+      }
+
+      // Load device groups
+      const groupsResp = await fetch('/api/vda_ir_control/device_groups', {
+        headers: {
+          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+        },
+      });
+      if (groupsResp.ok) {
+        const data = await groupsResp.json();
+        this._deviceGroups = data.groups || [];
+      }
+
+      // Load commands for currently selected device
+      await this._loadAvailableCommands();
+      this._render();
+    } catch (e) {
+      console.error('Failed to load devices:', e);
+    }
+  }
+
+  async _loadAvailableCommands() {
+    if (!this._hass || !this._config.device_id) {
+      this._availableCommands = [];
+      return;
+    }
+
+    // Check if it's a device group (groups don't have commands)
+    const isGroup = this._deviceGroups.some(g => g.group_id === this._config.device_id);
+    if (isGroup) {
+      this._availableCommands = [];
+      return;
+    }
+
+    // Find the device
+    const device = this._devices.find(d => d.device_id === this._config.device_id);
+    if (!device || !device.device_profile_id) {
+      this._availableCommands = [];
+      return;
+    }
+
+    try {
+      // Load profile commands
+      const profileId = device.device_profile_id;
+      const isBuiltin = profileId.startsWith('builtin:');
+      const endpoint = isBuiltin
+        ? `/api/vda_ir_control/builtin_profiles/${profileId.replace('builtin:', '')}`
+        : `/api/vda_ir_control/profiles/${profileId}`;
+
+      const resp = await fetch(endpoint, {
         headers: {
           'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
         },
       });
       if (resp.ok) {
-        const data = await resp.json();
-        this._devices = data.devices || [];
-        this._render();
+        const profile = await resp.json();
+        this._availableCommands = Object.keys(profile.codes || {});
       }
     } catch (e) {
-      console.error('Failed to load devices:', e);
+      console.error('Failed to load commands:', e);
+      this._availableCommands = [];
     }
   }
 
@@ -1516,16 +1780,29 @@ class VDAIRRemoteCardEditor extends HTMLElement {
       </style>
 
       <div class="form-group">
-        <label>Device</label>
+        <label>Device or Group</label>
         <select id="device_id">
-          <option value="">Select a device...</option>
-          ${this._devices.map(d => `
-            <option value="${d.device_id}" ${this._config.device_id === d.device_id ? 'selected' : ''}>
-              ${d.name} ${d.location ? `(${d.location})` : ''}
-            </option>
-          `).join('')}
+          <option value="">Select a device or group...</option>
+          ${this._deviceGroups.length > 0 ? `
+            <optgroup label="Device Groups">
+              ${this._deviceGroups.map(g => `
+                <option value="${g.group_id}" ${this._config.device_id === g.group_id ? 'selected' : ''}>
+                  ${g.name} ${g.location ? `(${g.location})` : ''} [${g.members?.length || 0} devices]
+                </option>
+              `).join('')}
+            </optgroup>
+          ` : ''}
+          ${this._devices.length > 0 ? `
+            <optgroup label="Individual Devices">
+              ${this._devices.map(d => `
+                <option value="${d.device_id}" ${this._config.device_id === d.device_id ? 'selected' : ''}>
+                  ${d.name} ${d.location ? `(${d.location})` : ''}
+                </option>
+              `).join('')}
+            </optgroup>
+          ` : ''}
         </select>
-        <div class="help-text">Select the IR-controlled device</div>
+        <div class="help-text">Select a device or group to control</div>
       </div>
 
       <div class="form-group">
@@ -1534,25 +1811,51 @@ class VDAIRRemoteCardEditor extends HTMLElement {
         <div class="help-text">Leave empty to use device name</div>
       </div>
 
-      <div class="form-group">
-        <label>Quick Buttons (optional)</label>
-        <input type="text" id="quick_buttons" value="${(this._config.quick_buttons || []).join(', ')}"
-               placeholder="power, volume_up, volume_down, mute">
-        <div class="help-text">Comma-separated list of commands for quick access buttons</div>
-      </div>
+      ${this._availableCommands.length > 0 ? `
+        <div class="form-group">
+          <label>Quick Buttons</label>
+          <div class="help-text" style="margin-bottom: 8px;">Select commands to show as quick access buttons</div>
+          <div style="max-height: 150px; overflow-y: auto; border: 1px solid var(--divider-color); border-radius: 6px; padding: 8px;">
+            ${this._availableCommands.map(cmd => `
+              <div style="padding: 4px 0;">
+                <label style="display: block; cursor: pointer;">
+                  <input type="checkbox" class="quick-btn-checkbox" data-command="${cmd}"
+                         ${(this._config.quick_buttons || []).includes(cmd) ? 'checked' : ''}
+                         style="margin-right: 8px; vertical-align: middle;">
+                  <span style="vertical-align: middle;">${this._formatCommandName(cmd)}</span>
+                </label>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : this._config.device_id && !this._deviceGroups.some(g => g.group_id === this._config.device_id) ? `
+        <div class="form-group">
+          <label>Quick Buttons</label>
+          <div class="help-text">Loading available commands...</div>
+        </div>
+      ` : ''}
     `;
 
     // Event listeners
-    this.shadowRoot.getElementById('device_id').addEventListener('change', (e) => {
+    this.shadowRoot.getElementById('device_id').addEventListener('change', async (e) => {
       this._updateConfig('device_id', e.target.value);
+      await this._loadAvailableCommands();
+      this._render();
     });
     this.shadowRoot.getElementById('name').addEventListener('input', (e) => {
       this._updateConfig('name', e.target.value);
     });
-    this.shadowRoot.getElementById('quick_buttons').addEventListener('input', (e) => {
-      const buttons = e.target.value.split(',').map(s => s.trim()).filter(s => s);
-      this._updateConfig('quick_buttons', buttons.length > 0 ? buttons : null);
+    this.shadowRoot.querySelectorAll('.quick-btn-checkbox').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const checked = Array.from(this.shadowRoot.querySelectorAll('.quick-btn-checkbox:checked'))
+          .map(c => c.dataset.command);
+        this._updateConfig('quick_buttons', checked.length > 0 ? checked : null);
+      });
     });
+  }
+
+  _formatCommandName(cmd) {
+    return cmd.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
   _updateConfig(key, value) {

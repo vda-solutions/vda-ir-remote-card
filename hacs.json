@@ -1,5 +1,6 @@
 {
   "name": "VDA IR Remote Card",
   "render_readme": true,
-  "filename": "vda-ir-remote-card.js"
+  "filename": "vda-ir-remote-card.js",
+  "version": "1.6.0"
 }
