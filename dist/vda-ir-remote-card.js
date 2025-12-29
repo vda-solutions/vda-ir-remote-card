@@ -111,22 +111,34 @@ class VDAIRRemoteCard extends HTMLElement {
 
       if (matrixResp.ok) {
         this._matrixDevice = await matrixResp.json();
-        // Get input commands (is_input_option=true)
+
+        // Check if matrix has pre-defined input commands (is_input_option=true)
         const commands = this._matrixDevice.commands || {};
         let inputCommands = Object.values(commands).filter(cmd => cmd.is_input_option);
 
         // If device is connected to a specific output, filter to only show commands for that output
-        const deviceOutput = this._device.matrix_output;
-        if (deviceOutput) {
+        const deviceOutput = this._device.matrix_port;
+        if (deviceOutput && inputCommands.length > 0) {
           // Filter commands that route to this output (command_id pattern: route_in{X}_out{Y})
           const outputSuffix = `_out${deviceOutput}`;
           const filteredCommands = inputCommands.filter(cmd =>
             cmd.command_id && cmd.command_id.includes(outputSuffix)
           );
-          // Use filtered if we found matches, otherwise fall back to all (for backwards compatibility)
           if (filteredCommands.length > 0) {
             inputCommands = filteredCommands;
           }
+        }
+
+        // If no pre-defined input commands, generate from matrix_inputs
+        if (inputCommands.length === 0) {
+          const matrixInputs = this._matrixDevice.matrix_inputs || [];
+          inputCommands = matrixInputs.map(input => ({
+            command_id: `route_input_${input.index}`,
+            name: input.name || `Input ${input.index}`,
+            input_value: String(input.index),
+            device_id: input.device_id,  // May have a linked source device
+            _generated: true
+          }));
         }
 
         this._matrixInputCommands = inputCommands;
@@ -897,20 +909,6 @@ class VDAIRRemoteCard extends HTMLElement {
         </div>
       ` : ''}
 
-      <!-- Matrix Input Selector -->
-      ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
-        <div class="remote-section matrix-input-section">
-          <div class="section-label">Matrix Input (${this._matrixDevice.name})</div>
-          <div class="matrix-input-row">
-            ${this._matrixInputCommands.map(cmd => `
-              <button class="btn matrix-input-btn ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}"
-                      data-matrix-command="${cmd.command_id}">
-                ${this._getMatrixInputDisplayName(cmd)}
-              </button>
-            `).join('')}
-          </div>
-        </div>
-      ` : ''}
 
       <!-- Navigation D-Pad -->
       ${navCmds.length > 0 ? `
@@ -969,8 +967,20 @@ class VDAIRRemoteCard extends HTMLElement {
         </div>
       ` : ''}
 
-      <!-- Inputs -->
-      ${inputCmds.length > 0 ? `
+      <!-- Inputs - Show matrix inputs if linked to matrix, otherwise show IR input commands -->
+      ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
+        <div class="remote-section matrix-input-section">
+          <div class="section-label">Inputs</div>
+          <div class="matrix-input-row">
+            ${this._matrixInputCommands.map(cmd => `
+              <button class="btn matrix-input-btn ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}"
+                      data-matrix-command="${cmd.command_id}">
+                ${this._getMatrixInputDisplayName(cmd)}
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      ` : inputCmds.length > 0 ? `
         <div class="remote-section">
           <div class="section-label">Inputs</div>
           <div class="input-row">
@@ -1035,12 +1045,31 @@ class VDAIRRemoteCard extends HTMLElement {
     const matrixId = this._device.matrix_device_id;
 
     try {
-      // Call the appropriate service based on matrix type
-      const serviceName = matrixType === 'network' ? 'send_network_command' : 'send_serial_command';
-      await this._hass.callService('vda_ir_control', serviceName, {
-        device_id: matrixId,
-        command_id: commandId,
-      });
+      // Find the command object to check if it's generated
+      const cmd = this._matrixInputCommands.find(c => c.command_id === commandId);
+
+      if (cmd && cmd._generated && matrixType === 'serial') {
+        // Generated command for serial matrix - send raw routing command
+        // OREI format: s in X av out Y!
+        const inputNum = cmd.input_value;
+        const outputNum = this._device.matrix_port;
+        const rawCommand = `s in ${inputNum} av out ${outputNum}!`;
+
+        console.log('Sending matrix routing command:', rawCommand);
+        await this._hass.callService('vda_ir_control', 'send_raw_serial_command', {
+          device_id: matrixId,
+          payload: rawCommand,
+          format: 'text',
+          wait_for_response: false,
+        });
+      } else {
+        // Pre-defined command - use standard command service
+        const serviceName = matrixType === 'network' ? 'send_network_command' : 'send_serial_command';
+        await this._hass.callService('vda_ir_control', serviceName, {
+          device_id: matrixId,
+          command_id: commandId,
+        });
+      }
 
       this._selectedMatrixInput = commandId;
       this._lastSent = `Matrix: ${commandId}`;
