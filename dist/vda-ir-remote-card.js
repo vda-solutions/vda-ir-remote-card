@@ -1051,6 +1051,14 @@ class VDAIRRemoteCard extends HTMLElement {
       if (cmd && cmd._generated && matrixType === 'serial') {
         // Generated command for serial matrix - use routing template
         const template = this._matrixDevice.routing_template;
+        console.log('Matrix routing debug:', {
+          template: template,
+          cmd: cmd,
+          input_value: cmd.input_value,
+          matrix_port: this._device.matrix_port,
+          device: this._device
+        });
+
         if (!template) {
           console.error('No routing template configured for matrix');
           return;
