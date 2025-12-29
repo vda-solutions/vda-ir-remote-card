@@ -348,6 +348,12 @@ class VDAIRRemoteCard extends HTMLElement {
         .quick-btn.sent {
           background: var(--success-color, #4caf50) !important;
         }
+        .input-label {
+          font-size: 11px;
+          color: var(--secondary-text-color);
+          margin-right: 4px;
+          align-self: center;
+        }
         .quick-btn.matrix-input {
           width: 36px;
           height: 36px;
@@ -627,6 +633,7 @@ class VDAIRRemoteCard extends HTMLElement {
                     ${this._getCommandIcon('power')}
                   </button>
                 ` : ''}
+                <span class="input-label">Inputs:</span>
                 ${this._matrixInputCommands.map(cmd => `
                   <button class="quick-btn matrix-input ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}"
                           data-matrix-command="${cmd.command_id}" title="${this._getMatrixInputDisplayName(cmd)}">
