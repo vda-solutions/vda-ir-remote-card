@@ -19,6 +19,9 @@ class VDAIRRemoteCard extends HTMLElement {
     this._selectedMatrixInput = null;
     // All controlled devices (for looking up device names for matrix inputs)
     this._allDevices = [];
+    // Source device (the device on the selected matrix input)
+    this._sourceDevice = null;
+    this._sourceCommands = [];
   }
 
   set hass(hass) {
@@ -185,6 +188,59 @@ class VDAIRRemoteCard extends HTMLElement {
         this._commands = profile.learned_commands || [];
         this._deviceType = profile.device_type;
       }
+    }
+  }
+
+  async _loadSourceDevice() {
+    // Load the device assigned to the currently selected matrix input
+    this._sourceDevice = null;
+    this._sourceCommands = [];
+
+    if (!this._matrixDevice || !this._selectedMatrixInput) return;
+
+    // Find the input command to get the input index
+    const inputCmd = this._matrixInputCommands.find(c => c.command_id === this._selectedMatrixInput);
+    if (!inputCmd) return;
+
+    const inputIndex = inputCmd.input_value;
+
+    // Find the matrix input with this index
+    const matrixInputs = this._matrixDevice.matrix_inputs || [];
+    const matrixInput = matrixInputs.find(i => String(i.index) === String(inputIndex));
+    if (!matrixInput || !matrixInput.device_id) return;
+
+    // Find the device in our cached devices
+    const sourceDevice = this._allDevices.find(d => d.device_id === matrixInput.device_id);
+    if (!sourceDevice) return;
+
+    this._sourceDevice = sourceDevice;
+
+    // Load the source device's commands from its profile
+    const profileId = sourceDevice.device_profile_id;
+    if (!profileId) return;
+
+    try {
+      if (profileId.startsWith('builtin:')) {
+        const resp = await fetch(`/api/vda_ir_control/builtin_profiles/${profileId.substring(8)}`, {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        });
+        if (resp.ok) {
+          const profile = await resp.json();
+          this._sourceCommands = Object.keys(profile.codes || {});
+          this._sourceDeviceType = profile.device_type;
+        }
+      } else {
+        const resp = await fetch(`/api/vda_ir_control/profiles/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        });
+        if (resp.ok) {
+          const profile = await resp.json();
+          this._sourceCommands = profile.learned_commands || [];
+          this._sourceDeviceType = profile.device_type;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load source device commands:', e);
     }
   }
 
@@ -505,6 +561,30 @@ class VDAIRRemoteCard extends HTMLElement {
           padding: 8px 14px;
           font-size: 13px;
         }
+        .dual-power {
+          gap: 12px;
+        }
+        .dual-power .btn {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: 10px 16px;
+          min-width: 70px;
+        }
+        .dual-power .power-icon {
+          font-size: 18px;
+        }
+        .dual-power .power-label {
+          font-size: 10px;
+          margin-top: 4px;
+          opacity: 0.9;
+        }
+        .dual-power .tv-power {
+          background: var(--error-color, #f44336);
+        }
+        .dual-power .source-power {
+          background: var(--primary-color, #03a9f4);
+        }
         .dpad {
           display: grid;
           grid-template-columns: repeat(3, 40px);
@@ -652,7 +732,7 @@ class VDAIRRemoteCard extends HTMLElement {
             <div class="modal-overlay" id="modal-overlay">
               <div class="modal" onclick="event.stopPropagation()">
                 <div class="modal-header">
-                  <span class="modal-title">${deviceName}</span>
+                  <span class="modal-title">${this._sourceDevice ? `${deviceName} → ${this._sourceDevice.name}` : deviceName}</span>
                   <button class="close-btn" id="close-modal">✕</button>
                 </div>
 
@@ -678,7 +758,11 @@ class VDAIRRemoteCard extends HTMLElement {
 
     // Add event listeners
     if (this._device) {
-      this.shadowRoot.getElementById('open-remote')?.addEventListener('click', () => {
+      this.shadowRoot.getElementById('open-remote')?.addEventListener('click', async () => {
+        // If linked to matrix, load the source device's commands
+        if (this._matrixDevice && this._selectedMatrixInput) {
+          await this._loadSourceDevice();
+        }
         this._showRemote = true;
         this._render();
       });
@@ -698,9 +782,10 @@ class VDAIRRemoteCard extends HTMLElement {
 
       this.shadowRoot.querySelectorAll('[data-command]').forEach(btn => {
         const command = btn.dataset.command;
+        const isSource = btn.dataset.source === 'true';
 
         if (repeatableCommands.includes(command)) {
-          // Press and hold support
+          // Press and hold support - always use TV for volume
           btn.addEventListener('mousedown', (e) => {
             e.preventDefault();
             this._startRepeat(command);
@@ -717,7 +802,16 @@ class VDAIRRemoteCard extends HTMLElement {
           // Normal click
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            this._sendCommand(command);
+            if (isSource && this._sourceDevice) {
+              // Send to source device
+              this._sendCommandToDevice(command, this._sourceDevice.device_id);
+            } else if (this._sourceDevice && !btn.dataset.deviceId && !['volume_up', 'volume_down', 'mute'].includes(command)) {
+              // In matrix mode, non-volume commands go to source device
+              this._sendCommandToDevice(command, this._sourceDevice.device_id);
+            } else {
+              // Send to TV device
+              this._sendCommand(command);
+            }
           });
         }
       });
@@ -934,11 +1028,17 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   _renderRemoteContent() {
-    const commands = this._commands;
+    // Check if we have a source device (matrix mode)
+    const hasSourceDevice = this._matrixDevice && this._sourceDevice && this._sourceCommands.length > 0;
+
+    // Use source device commands for navigation/playback, TV for volume
+    const commands = hasSourceDevice ? this._sourceCommands : this._commands;
+    const tvCommands = this._commands; // Always TV commands for volume
 
     // Group commands
     const powerCmds = commands.filter(c => c.includes('power'));
-    const volCmds = commands.filter(c => c.includes('volume') || c === 'mute');
+    const tvPowerCmds = tvCommands.filter(c => c.includes('power'));
+    const volCmds = tvCommands.filter(c => c.includes('volume') || c === 'mute'); // Volume from TV
     const chanCmds = commands.filter(c => c.includes('channel'));
     const navCmds = commands.filter(c => ['up', 'down', 'left', 'right', 'enter', 'select', 'back', 'exit', 'menu', 'home', 'guide', 'info'].includes(c));
     const numCmds = commands.filter(c => /^[0-9]$/.test(c));
@@ -946,8 +1046,23 @@ class VDAIRRemoteCard extends HTMLElement {
     const playCmds = commands.filter(c => ['play', 'pause', 'play_pause', 'stop', 'rewind', 'fast_forward', 'record', 'replay'].includes(c));
 
     return `
-      <!-- Power -->
-      ${powerCmds.length > 0 ? `
+      <!-- Power - Dual buttons when in matrix mode -->
+      ${hasSourceDevice ? `
+        <div class="remote-section">
+          <div class="power-row dual-power">
+            <button class="btn power tv-power" data-command="power" data-device-id="${this._device.device_id}">
+              <span class="power-icon">⏻</span>
+              <span class="power-label">TV</span>
+            </button>
+            ${powerCmds.includes('power') ? `
+              <button class="btn power source-power" data-command="power" data-source="true">
+                <span class="power-icon">⏻</span>
+                <span class="power-label">${this._sourceDevice.name.substring(0, 8)}</span>
+              </button>
+            ` : ''}
+          </div>
+        </div>
+      ` : powerCmds.length > 0 ? `
         <div class="remote-section">
           <div class="power-row">
             ${powerCmds.map(cmd => `
@@ -1085,6 +1200,36 @@ class VDAIRRemoteCard extends HTMLElement {
       }, 1000);
     } catch (e) {
       console.error('Failed to send command:', e);
+    }
+  }
+
+  async _sendCommandToDevice(command, deviceId) {
+    if (!deviceId) return;
+
+    // Debounce
+    const now = Date.now();
+    if (this._lastSendTime && now - this._lastSendTime < 150) {
+      return;
+    }
+    this._lastSendTime = now;
+
+    try {
+      await this._hass.callService('vda_ir_control', 'send_command', {
+        device_id: deviceId,
+        command: command,
+      });
+
+      this._lastSent = command;
+      this._render();
+
+      setTimeout(() => {
+        if (this._lastSent === command) {
+          this._lastSent = null;
+          this._render();
+        }
+      }, 1000);
+    } catch (e) {
+      console.error('Failed to send command to device:', e);
     }
   }
 
