@@ -33,10 +33,20 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   set hass(hass) {
+    const oldHass = this._hass;
     this._hass = hass;
     if (!this._initialized) {
       this._initialized = true;
       this._loadDeviceData();
+    }
+
+    // Re-render if showing remote and media_player state changed
+    if (this._showRemote && this._sourceMediaPlayerEntity && oldHass) {
+      const oldState = oldHass.states[this._sourceMediaPlayerEntity];
+      const newState = hass.states[this._sourceMediaPlayerEntity];
+      if (oldState !== newState) {
+        this._render();
+      }
     }
   }
 
