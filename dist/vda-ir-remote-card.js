@@ -1630,6 +1630,10 @@ class VDAIRRemoteCard extends HTMLElement {
 
       this._selectedMatrixInput = commandId;
       this._lastSent = `Matrix: ${commandId}`;
+
+      // Load the source device for the new input
+      await this._loadSourceDevice();
+
       this._render();
 
       // Clear indicator after 2s (longer for matrix since it's a selection)
