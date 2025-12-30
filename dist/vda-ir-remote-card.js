@@ -313,6 +313,8 @@ class VDAIRRemoteCard extends HTMLElement {
             if (matchingCmd) {
               this._selectedMatrixInput = matchingCmd.command_id;
               console.log('Set selected matrix input to:', this._selectedMatrixInput);
+              // Load source device for now playing info
+              await this._loadSourceDevice();
               // Re-render to update the dropdown
               this._render();
             } else {
