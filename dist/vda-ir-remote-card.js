@@ -40,12 +40,20 @@ class VDAIRRemoteCard extends HTMLElement {
       this._loadDeviceData();
     }
 
-    // Re-render if showing remote and media_player state changed
-    if (this._showRemote && this._sourceMediaPlayerEntity && oldHass) {
+    // Re-render if media_player state changed (for now playing info)
+    if (this._sourceMediaPlayerEntity && oldHass) {
       const oldState = oldHass.states[this._sourceMediaPlayerEntity];
       const newState = hass.states[this._sourceMediaPlayerEntity];
-      if (oldState !== newState) {
-        this._render();
+      if (oldState && newState) {
+        // Compare relevant attributes
+        const oldAttrs = oldState.attributes || {};
+        const newAttrs = newState.attributes || {};
+        if (oldState.state !== newState.state ||
+            oldAttrs.media_title !== newAttrs.media_title ||
+            oldAttrs.media_channel !== newAttrs.media_channel ||
+            oldAttrs.media_series_title !== newAttrs.media_series_title) {
+          this._render();
+        }
       }
     }
   }
@@ -774,6 +782,39 @@ class VDAIRRemoteCard extends HTMLElement {
           color: var(--primary-color);
           margin-top: 4px;
         }
+        .now-playing-compact {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 0;
+          border-top: 1px solid var(--divider-color, rgba(255,255,255,0.1));
+          margin-top: 8px;
+        }
+        .now-playing-image-compact {
+          width: 40px;
+          height: 40px;
+          border-radius: 4px;
+          object-fit: cover;
+        }
+        .now-playing-info-compact {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .now-playing-title-compact {
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--primary-text-color);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .now-playing-channel-compact {
+          font-size: 11px;
+          color: var(--secondary-text-color);
+        }
         .remote-section {
           background: var(--secondary-background-color);
           border-radius: 8px;
@@ -1066,6 +1107,8 @@ class VDAIRRemoteCard extends HTMLElement {
               `}
               <button class="expand-btn" id="open-remote">Remote</button>
             </div>
+
+            ${this._renderCompactNowPlaying()}
 
             ${this._showRemote ? `
               <div class="modal-overlay" id="modal-overlay">
@@ -1749,6 +1792,23 @@ class VDAIRRemoteCard extends HTMLElement {
       stop: 'Stop', rewind: 'Rewind', fast_forward: 'FF',
     };
     return names[cmd] || cmd.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  }
+
+  _renderCompactNowPlaying() {
+    const nowPlaying = this._getNowPlayingInfo();
+    if (!nowPlaying) return '';
+
+    return `
+      <div class="now-playing-compact">
+        ${nowPlaying.entity_picture ? `
+          <img src="${nowPlaying.entity_picture}" class="now-playing-image-compact" alt="">
+        ` : ''}
+        <div class="now-playing-info-compact">
+          <span class="now-playing-title-compact">${nowPlaying.media_title || ''}</span>
+          ${nowPlaying.media_channel ? `<span class="now-playing-channel-compact">${nowPlaying.media_channel}</span>` : ''}
+        </div>
+      </div>
+    `;
   }
 
   _getNowPlayingInfo() {
