@@ -29,6 +29,7 @@ class VDAIRRemoteCard extends HTMLElement {
     // HA Devices
     this._haDevices = [];
     this._sourceIsHADevice = false;
+    this._sourceMediaPlayerEntity = null;
   }
 
   set hass(hass) {
@@ -367,6 +368,24 @@ class VDAIRRemoteCard extends HTMLElement {
       this._sourceDevice = haDevice;
       this._sourceIsHADevice = true;
 
+      // Determine media_player entity for now playing info
+      // Use explicit media_player_entity_id if set, otherwise try to auto-detect
+      if (haDevice.media_player_entity_id) {
+        this._sourceMediaPlayerEntity = haDevice.media_player_entity_id;
+      } else if (haDevice.entity_id && haDevice.entity_id.startsWith('remote.')) {
+        // Auto-detect: try media_player with same suffix (e.g., remote.g -> media_player.g)
+        const suffix = haDevice.entity_id.replace('remote.', '');
+        const possibleMediaPlayer = `media_player.${suffix}`;
+        if (this._hass.states[possibleMediaPlayer]) {
+          this._sourceMediaPlayerEntity = possibleMediaPlayer;
+        }
+      } else if (haDevice.entity_id && haDevice.entity_id.startsWith('media_player.')) {
+        // Entity is already a media_player
+        this._sourceMediaPlayerEntity = haDevice.entity_id;
+      } else {
+        this._sourceMediaPlayerEntity = null;
+      }
+
       // Load commands for this HA device family
       try {
         const resp = await fetch(`/api/vda_ir_control/ha_devices/${haDevice.device_id}/commands`, {
@@ -391,6 +410,7 @@ class VDAIRRemoteCard extends HTMLElement {
 
     this._sourceDevice = sourceDevice;
     this._sourceIsHADevice = false;
+    this._sourceMediaPlayerEntity = null;
 
     // Load the source device's commands from its profile
     const profileId = sourceDevice.device_profile_id;
@@ -702,6 +722,47 @@ class VDAIRRemoteCard extends HTMLElement {
           position: relative;
           z-index: 1;
           padding: 0 12px;
+        }
+        .now-playing {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 12px;
+          background: var(--secondary-background-color);
+          border-radius: 8px;
+          margin-bottom: 12px;
+        }
+        .now-playing-image {
+          width: 60px;
+          height: 60px;
+          border-radius: 6px;
+          object-fit: cover;
+          background: var(--card-background-color);
+        }
+        .now-playing-info {
+          flex: 1;
+          min-width: 0;
+        }
+        .now-playing-title {
+          font-weight: 600;
+          font-size: 14px;
+          color: var(--primary-text-color);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .now-playing-subtitle {
+          font-size: 12px;
+          color: var(--secondary-text-color);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          margin-top: 2px;
+        }
+        .now-playing-channel {
+          font-size: 11px;
+          color: var(--primary-color);
+          margin-top: 4px;
         }
         .remote-section {
           background: var(--secondary-background-color);
@@ -1315,13 +1376,29 @@ class VDAIRRemoteCard extends HTMLElement {
     const powerCmds = commands.filter(c => c.includes('power'));
     const tvPowerCmds = tvCommands.filter(c => c.includes('power'));
     const volCmds = tvCommands.filter(c => c.includes('volume') || c === 'mute'); // Volume from TV
-    const chanCmds = commands.filter(c => c.includes('channel'));
+    const chanCmds = commands.filter(c => c.includes('channel') || c.includes('chan'));
     const navCmds = commands.filter(c => ['up', 'down', 'left', 'right', 'enter', 'select', 'back', 'exit', 'menu', 'home', 'guide', 'info'].includes(c));
     const numCmds = commands.filter(c => /^[0-9]$/.test(c));
     const inputCmds = commands.filter(c => c.includes('hdmi') || c.includes('source') || c.includes('input'));
-    const playCmds = commands.filter(c => ['play', 'pause', 'play_pause', 'stop', 'rewind', 'fast_forward', 'record', 'replay'].includes(c));
+    const playCmds = commands.filter(c => ['play', 'pause', 'play_pause', 'stop', 'rewind', 'fast_forward', 'record', 'replay', 'ffwd', 'rew'].includes(c));
+
+    // Get now playing info for HA source device
+    const nowPlaying = this._getNowPlayingInfo();
 
     return `
+      <!-- Now Playing Info -->
+      ${nowPlaying ? `
+        <div class="now-playing">
+          ${nowPlaying.entity_picture ? `
+            <img src="${nowPlaying.entity_picture}" class="now-playing-image" alt="">
+          ` : ''}
+          <div class="now-playing-info">
+            <div class="now-playing-title">${nowPlaying.media_title || ''}</div>
+            ${nowPlaying.media_series_title ? `<div class="now-playing-subtitle">${nowPlaying.media_series_title}</div>` : ''}
+            ${nowPlaying.media_channel ? `<div class="now-playing-channel">${nowPlaying.media_channel}</div>` : ''}
+          </div>
+        </div>
+      ` : ''}
       <!-- Power - Dual buttons when in matrix mode -->
       ${hasSourceDevice ? `
         <div class="remote-section">
@@ -1662,6 +1739,32 @@ class VDAIRRemoteCard extends HTMLElement {
       stop: 'Stop', rewind: 'Rewind', fast_forward: 'FF',
     };
     return names[cmd] || cmd.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  }
+
+  _getNowPlayingInfo() {
+    // Only show now playing for HA source devices with a media_player entity
+    if (!this._sourceIsHADevice || !this._sourceMediaPlayerEntity) {
+      return null;
+    }
+
+    const state = this._hass.states[this._sourceMediaPlayerEntity];
+    if (!state || state.state === 'off' || state.state === 'unavailable') {
+      return null;
+    }
+
+    const attrs = state.attributes || {};
+    // Only return if there's actual media info to display
+    if (!attrs.media_title && !attrs.media_channel) {
+      return null;
+    }
+
+    return {
+      media_title: attrs.media_title || null,
+      media_series_title: attrs.media_series_title || null,
+      media_channel: attrs.media_channel || null,
+      entity_picture: attrs.entity_picture || null,
+      state: state.state,
+    };
   }
 
   _getCommandIcon(cmd) {
