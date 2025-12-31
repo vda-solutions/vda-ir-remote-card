@@ -285,18 +285,38 @@ class VDAIRRemoteCard extends HTMLElement {
           }
 
           // Check if this serial device is assigned to a matrix output
-          // Look through all serial matrices to find if this device is an output
+          // Need to fetch full matrix details since list API doesn't include device_id in outputs
           for (const matrix of serialDevices.filter(d => d.device_type === 'hdmi_matrix')) {
-            const outputs = matrix.matrix_outputs || [];
-            const outputMatch = outputs.find(o => o.device_id === this._serialDevice.device_id);
-            if (outputMatch) {
-              // Found! This serial device is connected to this matrix output
-              this._serialDeviceMatrixId = matrix.device_id;
-              this._serialDeviceMatrixPort = outputMatch.index;
-              console.log('Serial device connected to matrix:', matrix.device_id, 'port:', outputMatch.index);
-              // Load full matrix details for input commands
-              await this._loadMatrixForSerialDevice(matrix.device_id, authHeader);
-              break;
+            // Fetch full matrix details to get device_id assignments
+            const matrixDetailResp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrix.device_id)}`, {
+              headers: authHeader,
+            });
+            if (matrixDetailResp.ok) {
+              const fullMatrix = await matrixDetailResp.json();
+              const outputs = fullMatrix.matrix_outputs || [];
+              const outputMatch = outputs.find(o => o.device_id === this._serialDevice.device_id);
+              if (outputMatch) {
+                // Found! This serial device is connected to this matrix output
+                this._serialDeviceMatrixId = matrix.device_id;
+                this._serialDeviceMatrixPort = outputMatch.index;
+                console.log('Serial device connected to matrix:', matrix.device_id, 'port:', outputMatch.index);
+                // Store the full matrix and build input commands
+                this._matrixDevice = fullMatrix;
+                const matrixInputs = fullMatrix.matrix_inputs || [];
+                this._matrixInputCommands = matrixInputs
+                  .filter(input => input.enabled !== false)
+                  .map(input => ({
+                    command_id: `route_input_${input.index}`,
+                    name: input.name || `Input ${input.index}`,
+                    input_value: String(input.index),
+                    device_id: input.device_id,
+                    _generated: true
+                  }));
+                console.log('Matrix inputs loaded:', this._matrixInputCommands.length);
+                // Query current routing (non-blocking)
+                this._queryMatrixRoutingForSerial().catch(e => console.warn('Matrix query failed:', e));
+                break;
+              }
             }
           }
         } catch (e) {
