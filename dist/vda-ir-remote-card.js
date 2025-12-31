@@ -357,28 +357,27 @@ class VDAIRRemoteCard extends HTMLElement {
     const queryCmd = queryTemplate.replace('{output}', outputNum);
 
     try {
-      // Use cache with queue to prevent duplicate queries
-      const result = await VDADataCache.fetch(cacheKey, async () => {
-        return VDAMatrixQueryQueue.enqueue(async () => {
-          const resp = await fetch(`/api/vda_ir_control/serial_devices/${matrixId}/send`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              payload: queryCmd,
-              format: 'text',
-              line_ending: 'none',
-              wait_for_response: true,
-              timeout: 1.0,  // Reduced from 2s
-            }),
-          });
-          if (resp.ok) {
-            return await resp.json();
-          }
-          return null;
+      // Use queue to prevent multiple cards from overwhelming serial device
+      // Don't cache - matrix state changes frequently
+      const result = await VDAMatrixQueryQueue.enqueue(async () => {
+        const resp = await fetch(`/api/vda_ir_control/serial_devices/${matrixId}/send`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            payload: queryCmd,
+            format: 'text',
+            line_ending: 'none',
+            wait_for_response: true,
+            timeout: 2.0,
+          }),
         });
+        if (resp.ok) {
+          return await resp.json();
+        }
+        return null;
       });
 
       if (result) {
