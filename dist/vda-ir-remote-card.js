@@ -1,8 +1,7 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.9.1-debug
- * @build 20231231-matrix-fix
+ * @version 1.9.2
  */
 
 // Global data cache - shared across all card instances to avoid duplicate API calls
@@ -122,6 +121,8 @@ class VDAIRRemoteCard extends HTMLElement {
     // Serial device matrix linking
     this._serialDeviceMatrixId = null;
     this._serialDeviceMatrixPort = null;
+    // Other devices sharing the same matrix output (for power buttons)
+    this._serialOutputDevices = [];
   }
 
   set hass(hass) {
@@ -288,8 +289,6 @@ class VDAIRRemoteCard extends HTMLElement {
           // Check if this serial device is assigned to a matrix output
           // Need to fetch full matrix details since list API doesn't include device_id in outputs
           const matrixDevices = serialDevices.filter(d => d.device_type === 'hdmi_matrix');
-          console.log('[VDA Debug] Looking for matrices. Found:', matrixDevices.length, 'Serial device:', this._serialDevice.device_id);
-          console.log('[VDA Debug] All serial devices:', serialDevices.map(d => ({id: d.device_id, type: d.device_type})));
           for (const matrix of matrixDevices) {
             // Fetch full matrix details to get device_id assignments
             const matrixDetailResp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrix.device_id)}`, {
@@ -298,9 +297,7 @@ class VDAIRRemoteCard extends HTMLElement {
             if (matrixDetailResp.ok) {
               const fullMatrix = await matrixDetailResp.json();
               const outputs = fullMatrix.matrix_outputs || [];
-              console.log('[VDA Debug] Matrix:', matrix.device_id, 'Outputs:', outputs.map(o => ({idx: o.index, dev: o.device_id})));
               const outputMatch = outputs.find(o => o.device_id === this._serialDevice.device_id);
-              console.log('[VDA Debug] Looking for device_id:', this._serialDevice.device_id, 'Match:', outputMatch);
               if (outputMatch) {
                 // Found! This serial device is connected to this matrix output
                 this._serialDeviceMatrixId = matrix.device_id;
@@ -319,6 +316,21 @@ class VDAIRRemoteCard extends HTMLElement {
                     _generated: true
                   }));
                 console.log('Matrix inputs loaded:', this._matrixInputCommands.length);
+
+                // Find other devices sharing the same matrix output (for splitter scenarios)
+                // Check IR devices
+                const irDevicesOnOutput = allDevices.filter(d =>
+                  d.matrix_port === outputMatch.index &&
+                  d.matrix_device_id === matrix.device_id
+                );
+                // Check other serial devices on the same output (excluding self and matrix)
+                const serialDevicesOnOutput = outputs
+                  .filter(o => o.index === outputMatch.index && o.device_id && o.device_id !== this._serialDevice.device_id)
+                  .map(o => serialDevices.find(sd => sd.device_id === o.device_id))
+                  .filter(sd => sd && sd.device_type !== 'hdmi_matrix');
+                this._serialOutputDevices = [...irDevicesOnOutput, ...serialDevicesOnOutput];
+                console.log('Other devices on same output:', this._serialOutputDevices.map(d => d.name || d.device_id));
+
                 // Query current routing (non-blocking)
                 this._queryMatrixRoutingForSerial().catch(e => console.warn('Matrix query failed:', e));
                 break;
@@ -1353,6 +1365,22 @@ class VDAIRRemoteCard extends HTMLElement {
           width: 16px;
           height: 16px;
         }
+        .quick-btn.compact.labeled {
+          width: auto;
+          min-width: 36px;
+          padding: 0 8px;
+          border-radius: 18px;
+          gap: 4px;
+        }
+        .quick-btn.compact.labeled svg {
+          width: 14px;
+          height: 14px;
+        }
+        .quick-btn .btn-label {
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: -0.3px;
+        }
         .matrix-input-select.compact {
           padding: 6px 8px;
           font-size: 12px;
@@ -1378,23 +1406,32 @@ class VDAIRRemoteCard extends HTMLElement {
               <div class="group-status">${this._groupPowerStatus}</div>
             ` : ''}
           </div>
-        ` : this._isSerialDevice && this._serialDevice ? (() => {
-          console.log('[VDA Render] Serial device render. matrixDevice:', !!this._matrixDevice, 'inputCommands:', this._matrixInputCommands?.length);
-          return `
+        ` : this._isSerialDevice && this._serialDevice ? `
           <div class="card-content">
             <div class="card-header">
-              <span class="device-icon">${this._getSerialDeviceIcon()}</span>`;
-        })() + `
+              <span class="device-icon">${this._getSerialDeviceIcon()}</span>
               <div style="flex:1">
                 <div class="device-name">${this._config.name || this._serialDevice.name}</div>
                 ${this._serialDevice.location ? `<div class="device-location">${this._serialDevice.location}</div>` : ''}
               </div>
               ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
-                <button class="quick-btn power compact ${this._lastSent === 'power_on' ? 'sent' : ''}"
+                <button class="quick-btn power compact labeled ${this._lastSent === 'power_on' ? 'sent' : ''}"
                         data-serial-command="power_on" title="Power ${this._serialDevice.name}">
-                  ${this._getCommandIcon('power')}
+                  ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(this._serialDevice.name)}</span>
                 </button>
               ` : ''}
+              ${(this._serialOutputDevices || []).map(dev => {
+                const isSerial = dev.device_type && dev.device_type !== 'tv' && dev.device_type !== 'cable_box';
+                const hasIRPower = dev.profile_id || (dev.commands && (dev.commands.power || dev.commands.power_on));
+                const hasSerialPower = dev.commands && (dev.commands.power_on || dev.commands.power_off);
+                if (!hasIRPower && !hasSerialPower) return '';
+                return `
+                <button class="quick-btn power compact labeled ${this._lastSent === 'power_output_' + dev.device_id ? 'sent' : ''}"
+                        data-output-device-id="${dev.device_id}" data-output-device-type="${isSerial ? 'serial' : 'ir'}"
+                        title="Power ${dev.name || dev.device_id}">
+                  ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(dev.name || dev.device_id)}</span>
+                </button>`;
+              }).join('')}
               ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
                 <select class="matrix-input-select compact" id="serial-matrix-input-dropdown">
                   <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
@@ -1485,15 +1522,15 @@ class VDAIRRemoteCard extends HTMLElement {
               </div>
               ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
                 ${this._commands.includes('power') ? `
-                  <button class="quick-btn power compact ${this._lastSent === 'power_' + this._device.device_id ? 'sent' : ''}"
+                  <button class="quick-btn power compact labeled ${this._lastSent === 'power_' + this._device.device_id ? 'sent' : ''}"
                           data-command="power" data-device-id="${this._device.device_id}" title="Power ${this._device.name}">
-                    ${this._getCommandIcon('power')}
+                    ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(this._device.name)}</span>
                   </button>
                 ` : ''}
                 ${this._tvDevices.map(tv => `
-                  <button class="quick-btn power compact ${this._lastSent === 'power_tv_' + tv.device_id ? 'sent' : ''}"
+                  <button class="quick-btn power compact labeled ${this._lastSent === 'power_tv_' + tv.device_id ? 'sent' : ''}"
                           data-command="power" data-tv-device-id="${tv.device_id}" title="Power ${tv.name}">
-                    ${this._getCommandIcon('power')}
+                    ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(tv.name)}</span>
                   </button>
                 `).join('')}
                 <select class="matrix-input-select compact" id="matrix-input-dropdown">
@@ -1600,6 +1637,33 @@ class VDAIRRemoteCard extends HTMLElement {
           if (this._sourceDevice && !this._sourceIsHADevice) {
             await this._sendCommandToDevice(command, this._sourceDevice.device_id);
           }
+        });
+      });
+      // Output device power buttons (other devices on same matrix output)
+      this.shadowRoot.querySelectorAll('[data-output-device-id]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const deviceId = btn.dataset.outputDeviceId;
+          const deviceType = btn.dataset.outputDeviceType;
+          this._lastSent = 'power_output_' + deviceId;
+          this._render();
+          try {
+            if (deviceType === 'serial') {
+              // Send power_on command to serial device
+              await this._hass.callService('vda_ir_control', 'send_serial_command', {
+                device_id: deviceId,
+                command_id: 'power_on',
+              });
+            } else {
+              // Send power command to IR device
+              await this._hass.callService('vda_ir_control', 'send_ir_code', {
+                device_id: deviceId,
+                command: 'power',
+              });
+            }
+          } catch (e) {
+            console.error('Failed to send power command:', e);
+          }
+          setTimeout(() => { this._lastSent = null; this._render(); }, 1000);
         });
       });
     }
@@ -2548,6 +2612,23 @@ class VDAIRRemoteCard extends HTMLElement {
       default: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 6H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H4V8h16v8z"/></svg>`,
     };
     return icons[this._serialDevice.device_type] || icons.default;
+  }
+
+  _getShortName(name) {
+    if (!name) return '?';
+    // Extract a short label from device name
+    // "Bar Projector" -> "Proj", "Bar TV 1" -> "TV1", "TV 10" -> "TV10"
+    const lower = name.toLowerCase();
+    if (lower.includes('projector') || lower.includes('proj')) {
+      return 'Proj';
+    }
+    // Match "TV X" or "Bar TV X" patterns
+    const tvMatch = name.match(/tv\s*(\d+)/i);
+    if (tvMatch) {
+      return `TV${tvMatch[1]}`;
+    }
+    // For other names, take first 4 chars
+    return name.substring(0, 4);
   }
 
   getCardSize() {
