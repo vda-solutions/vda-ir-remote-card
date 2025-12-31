@@ -133,45 +133,51 @@ class VDAIRRemoteCard extends HTMLElement {
     if (!this._hass || !this._config.device_id) return;
 
     try {
-      // First check if this is a device group
-      const groupsResp = await fetch('/api/vda_ir_control/device_groups', {
-        headers: {
-          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-        },
-      });
+      // Fetch all data in parallel for speed
+      const [groupsResp, devicesResp, serialResp, haDevicesResp] = await Promise.all([
+        fetch('/api/vda_ir_control/device_groups', {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        }),
+        fetch('/api/vda_ir_control/devices', {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        }),
+        fetch('/api/vda_ir_control/serial_devices', {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        }),
+        fetch('/api/vda_ir_control/ha_devices', {
+          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        }),
+      ]);
 
+      // Process groups
       if (groupsResp.ok) {
         const groupsData = await groupsResp.json();
         this._deviceGroup = (groupsData.groups || []).find(g => g.group_id === this._config.device_id);
         this._isDeviceGroup = !!this._deviceGroup;
       }
 
-      // Fetch all devices from API (needed for both regular devices and group member info)
-      const devicesResp = await fetch('/api/vda_ir_control/devices', {
-        headers: {
-          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-        },
-      });
-
+      // Process devices
       let allDevices = [];
       if (devicesResp.ok) {
         const data = await devicesResp.json();
         allDevices = data.devices || [];
+        this._allDevices = allDevices;
         if (!this._isDeviceGroup) {
           this._device = allDevices.find(d => d.device_id === this._config.device_id);
         }
       }
 
-      // Also fetch serial devices for group members
+      // Process serial devices
       let serialDevices = [];
-      const serialResp = await fetch('/api/vda_ir_control/serial_devices', {
-        headers: {
-          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-        },
-      });
       if (serialResp.ok) {
         const serialData = await serialResp.json();
         serialDevices = serialData.devices || [];
+      }
+
+      // Process HA devices
+      if (haDevicesResp.ok) {
+        const haData = await haDevicesResp.json();
+        this._haDevices = haData.devices || [];
       }
 
       // If this is a device group, load member device info
@@ -229,19 +235,14 @@ class VDAIRRemoteCard extends HTMLElement {
     const matrixType = this._device.matrix_device_type;
 
     try {
-      // Load matrix device and all controlled devices in parallel
+      // Only fetch matrix device details (devices and HA devices already loaded)
       const endpoint = matrixType === 'network'
         ? `/api/vda_ir_control/network_devices/${matrixId}`
         : `/api/vda_ir_control/serial_devices/${matrixId}`;
 
-      const [matrixResp, devicesResp] = await Promise.all([
-        fetch(endpoint, {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
-        }),
-        fetch('/api/vda_ir_control/devices', {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
-        })
-      ]);
+      const matrixResp = await fetch(endpoint, {
+        headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+      });
 
       if (matrixResp.ok) {
         this._matrixDevice = await matrixResp.json();
@@ -281,22 +282,13 @@ class VDAIRRemoteCard extends HTMLElement {
         this._matrixInputCommands = inputCommands;
       }
 
-      if (devicesResp.ok) {
-        const devicesData = await devicesResp.json();
-        this._allDevices = devicesData.devices || [];
+      // _allDevices and _haDevices already loaded in _loadDeviceData - no need to fetch again
+      // Just log if they're not available for debugging
+      if (!this._allDevices) {
+        console.warn('_allDevices not loaded');
       }
-
-      // Also load HA devices (for matrix source device lookup)
-      try {
-        const haDevicesResp = await fetch('/api/vda_ir_control/ha_devices', {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
-        });
-        if (haDevicesResp.ok) {
-          const haData = await haDevicesResp.json();
-          this._haDevices = haData.devices || [];
-        }
-      } catch (e) {
-        console.error('Failed to load HA devices:', e);
+      if (!this._haDevices) {
+        console.warn('_haDevices not loaded');
         this._haDevices = [];
       }
 
