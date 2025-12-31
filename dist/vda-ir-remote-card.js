@@ -200,12 +200,23 @@ class VDAIRRemoteCard extends HTMLElement {
       // Process devices
       const allDevices = devicesData.devices || [];
       this._allDevices = allDevices;
-      if (!this._isDeviceGroup) {
-        this._device = allDevices.find(d => d.device_id === this._config.device_id);
-      }
 
       // Process serial devices
       const serialDevices = serialData.devices || [];
+      this._serialDevices = serialDevices;
+
+      // Check if this is a serial device (device_id starts with serial:)
+      const configDeviceId = this._config.device_id || '';
+      this._isSerialDevice = configDeviceId.startsWith('serial:');
+
+      if (this._isSerialDevice) {
+        const serialDeviceId = configDeviceId.replace('serial:', '');
+        this._serialDevice = serialDevices.find(d => d.device_id === serialDeviceId);
+        this._device = null;
+      } else if (!this._isDeviceGroup) {
+        this._device = allDevices.find(d => d.device_id === this._config.device_id);
+        this._serialDevice = null;
+      }
 
       // Process HA devices
       this._haDevices = haData.devices || [];
@@ -245,6 +256,18 @@ class VDAIRRemoteCard extends HTMLElement {
             .map(tvId => allDevices.find(d => d.device_id === tvId))
             .filter(d => d !== null && d !== undefined);
         }
+      }
+
+      // Load serial device commands
+      if (this._isSerialDevice && this._serialDevice) {
+        const commands = this._serialDevice.commands || {};
+        this._serialCommands = Object.keys(commands).map(cmdId => ({
+          command_id: cmdId,
+          name: commands[cmdId].name || cmdId,
+          ...commands[cmdId]
+        }));
+      } else {
+        this._serialCommands = [];
       }
 
       this._render();
@@ -1163,6 +1186,64 @@ class VDAIRRemoteCard extends HTMLElement {
               <div class="group-status">${this._groupPowerStatus}</div>
             ` : ''}
           </div>
+        ` : this._isSerialDevice && this._serialDevice ? `
+          <div class="card-content">
+            <div class="card-header">
+              <span class="device-icon">${this._getSerialDeviceIcon()}</span>
+              <div style="flex:1">
+                <div class="device-name">${this._config.name || this._serialDevice.name}</div>
+                ${this._serialDevice.location ? `<div class="device-location">${this._serialDevice.location}</div>` : ''}
+              </div>
+              ${this._serialCommands.some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
+                <button class="quick-btn power compact ${this._lastSent === 'serial_power' ? 'sent' : ''}"
+                        data-serial-command="power_on" title="Power">
+                  ${this._getCommandIcon('power')}
+                </button>
+              ` : ''}
+              <button class="expand-btn" id="open-serial-remote">Remote</button>
+            </div>
+
+            ${this._showRemote ? `
+              <div class="modal-overlay" id="modal-overlay">
+                <div class="modal" onclick="event.stopPropagation()">
+                  <div class="modal-header">
+                    <span class="modal-title">${this._config.name || this._serialDevice.name}</span>
+                    <button class="close-btn" id="close-modal">✕</button>
+                  </div>
+
+                  <div class="toast-container">
+                    <div class="sent-toast ${this._lastSent ? 'visible' : ''}">
+                      <div class="toast-fill"></div>
+                      <span class="toast-text">${this._lastSent ? this._formatCommand(this._lastSent) : ''}</span>
+                    </div>
+                  </div>
+
+                  <div class="remote-body">
+                    ${this._serialCommands.some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
+                      <div class="remote-section">
+                        <div class="power-row">
+                          <button class="btn power ${this._lastSent === 'power_on' ? 'sent' : ''}"
+                                  data-serial-command="power_on">⏻ On</button>
+                          <button class="btn ${this._lastSent === 'power_off' ? 'sent' : ''}"
+                                  data-serial-command="power_off">⏻ Off</button>
+                        </div>
+                      </div>
+                    ` : ''}
+
+                    <div class="remote-section">
+                      <div class="section-label">Commands</div>
+                      <div class="input-row">
+                        ${this._serialCommands.filter(c => !c.command_id.startsWith('power_')).map(cmd => `
+                          <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
+                                  data-serial-command="${cmd.command_id}">${cmd.name}</button>
+                        `).join('')}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ` : ''}
+          </div>
         ` : this._device ? `
           <div class="card-content">
             <div class="card-header">
@@ -1237,6 +1318,31 @@ class VDAIRRemoteCard extends HTMLElement {
     if (this._isDeviceGroup && this._deviceGroup) {
       this.shadowRoot.getElementById('group-power-btn')?.addEventListener('click', () => {
         this._sendGroupPowerCommand();
+      });
+    }
+
+    // Add event listeners for serial devices
+    if (this._isSerialDevice && this._serialDevice) {
+      this.shadowRoot.getElementById('open-serial-remote')?.addEventListener('click', () => {
+        this._showRemote = true;
+        this._render();
+      });
+      this.shadowRoot.getElementById('modal-overlay')?.addEventListener('click', () => {
+        this._showRemote = false;
+        this._lastSent = null;
+        this._render();
+      });
+      this.shadowRoot.getElementById('close-modal')?.addEventListener('click', () => {
+        this._showRemote = false;
+        this._lastSent = null;
+        this._render();
+      });
+      // Serial command buttons
+      this.shadowRoot.querySelectorAll('[data-serial-command]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const commandId = btn.dataset.serialCommand;
+          await this._sendSerialCommand(commandId);
+        });
       });
     }
 
@@ -1727,6 +1833,37 @@ class VDAIRRemoteCard extends HTMLElement {
     }
   }
 
+  async _sendSerialCommand(commandId) {
+    if (!this._serialDevice) return;
+
+    // Debounce - prevent rapid fire commands
+    const now = Date.now();
+    if (this._lastSendTime && now - this._lastSendTime < 150) {
+      return;
+    }
+    this._lastSendTime = now;
+
+    try {
+      await this._hass.callService('vda_ir_control', 'send_serial_command', {
+        device_id: this._serialDevice.device_id,
+        command_id: commandId,
+      });
+
+      this._lastSent = commandId;
+      this._render();
+
+      // Clear indicator after 1s
+      setTimeout(() => {
+        if (this._lastSent === commandId) {
+          this._lastSent = null;
+          this._render();
+        }
+      }, 1000);
+    } catch (e) {
+      console.error('Failed to send serial command:', e);
+    }
+  }
+
   async _sendGroupPowerCommand() {
     if (!this._deviceGroup || !this._groupMemberDevices.length) return;
 
@@ -1987,6 +2124,16 @@ class VDAIRRemoteCard extends HTMLElement {
     return icons[this._deviceType] || icons.tv;
   }
 
+  _getSerialDeviceIcon() {
+    if (!this._serialDevice) return '';
+    const icons = {
+      projector: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M22 7v10c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V7c0-1.1.9-2 2-2h16c1.1 0 2 .9 2 2zM4 17h16V7H4v10zm10-5c0-1.66-1.34-3-3-3s-3 1.34-3 3 1.34 3 3 3 3-1.34 3-3zm5-2h2v2h-2z"/></svg>`,
+      hdmi_matrix: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg>`,
+      default: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 6H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H4V8h16v8z"/></svg>`,
+    };
+    return icons[this._serialDevice.device_type] || icons.default;
+  }
+
   getCardSize() {
     return 2;
   }
@@ -2066,7 +2213,19 @@ class VDAIRRemoteCardEditor extends HTMLElement {
       return;
     }
 
-    // Find the device
+    // Check if it's a serial device
+    if (this._config.device_id.startsWith('serial:')) {
+      const serialDeviceId = this._config.device_id.replace('serial:', '');
+      const serialDevice = this._serialDevices.find(d => d.device_id === serialDeviceId);
+      if (serialDevice && serialDevice.commands) {
+        this._availableCommands = Object.keys(serialDevice.commands);
+      } else {
+        this._availableCommands = [];
+      }
+      return;
+    }
+
+    // Find the IR device
     const device = this._devices.find(d => d.device_id === this._config.device_id);
     if (!device || !device.device_profile_id) {
       this._availableCommands = [];
