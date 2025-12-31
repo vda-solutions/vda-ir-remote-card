@@ -1,7 +1,49 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
+ * @version 1.8.0
  */
+
+// Global query queue to prevent multiple cards from overwhelming the serial device
+const VDAMatrixQueryQueue = {
+  _queue: [],
+  _processing: false,
+  _lastQueryTime: 0,
+  _minInterval: 300, // Minimum ms between queries
+
+  async enqueue(queryFn) {
+    return new Promise((resolve, reject) => {
+      this._queue.push({ queryFn, resolve, reject });
+      this._processQueue();
+    });
+  },
+
+  async _processQueue() {
+    if (this._processing || this._queue.length === 0) return;
+    this._processing = true;
+
+    while (this._queue.length > 0) {
+      const { queryFn, resolve, reject } = this._queue.shift();
+
+      // Wait for minimum interval since last query
+      const now = Date.now();
+      const elapsed = now - this._lastQueryTime;
+      if (elapsed < this._minInterval) {
+        await new Promise(r => setTimeout(r, this._minInterval - elapsed));
+      }
+
+      try {
+        this._lastQueryTime = Date.now();
+        const result = await queryFn();
+        resolve(result);
+      } catch (e) {
+        reject(e);
+      }
+    }
+
+    this._processing = false;
+  }
+};
 
 class VDAIRRemoteCard extends HTMLElement {
   constructor() {
@@ -30,6 +72,10 @@ class VDAIRRemoteCard extends HTMLElement {
     this._haDevices = [];
     this._sourceIsHADevice = false;
     this._sourceMediaPlayerEntity = null;
+    // Multiple output devices (TVs sharing same matrix output via splitter)
+    this._outputDevices = [];
+    // TV devices configured in card config (for power buttons)
+    this._tvDevices = [];
   }
 
   set hass(hass) {
@@ -147,6 +193,22 @@ class VDAIRRemoteCard extends HTMLElement {
         await this._loadCommands();
         // Load matrix device if linked
         await this._loadMatrixDevice();
+
+        // Find all devices sharing the same matrix output (for HDMI splitters)
+        if (this._device.matrix_port && this._device.matrix_device_id) {
+          this._outputDevices = allDevices.filter(d =>
+            d.device_id !== this._device.device_id &&
+            d.matrix_port === this._device.matrix_port &&
+            d.matrix_device_id === this._device.matrix_device_id
+          );
+        }
+
+        // Load TV devices from card config (for power buttons on splitter outputs)
+        if (this._config.tv_devices && Array.isArray(this._config.tv_devices)) {
+          this._tvDevices = this._config.tv_devices
+            .map(tvId => allDevices.find(d => d.device_id === tvId))
+            .filter(d => d !== null && d !== undefined);
+        }
       }
 
       this._render();
@@ -259,40 +321,40 @@ class VDAIRRemoteCard extends HTMLElement {
     // Use query template if configured, otherwise skip
     const queryTemplate = this._matrixDevice.query_template;
     if (!queryTemplate) {
-      console.log('No query template configured for matrix');
       return;
     }
 
     const outputNum = this._device.matrix_port;
     const queryCmd = queryTemplate.replace('{output}', outputNum);
-    console.log('Matrix query command:', queryCmd);
 
     try {
-      // Use REST API to get response
-      const resp = await fetch(`/api/vda_ir_control/serial_devices/${this._device.matrix_device_id}/send`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          payload: queryCmd,
-          format: 'text',
-          line_ending: 'cr',
-          wait_for_response: true,
-          timeout: 2.0,
-        }),
+      // Use queue to prevent multiple cards from overwhelming serial device
+      const result = await VDAMatrixQueryQueue.enqueue(async () => {
+        const resp = await fetch(`/api/vda_ir_control/serial_devices/${this._device.matrix_device_id}/send`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            payload: queryCmd,
+            format: 'text',
+            line_ending: 'cr',
+            wait_for_response: true,
+            timeout: 2.0,
+          }),
+        });
+        if (resp.ok) {
+          return await resp.json();
+        }
+        return null;
       });
 
-      if (resp.ok) {
-        const result = await resp.json();
-        console.log('Matrix routing query response:', result);
-
+      if (result) {
         // Parse response to extract input number
         // OREI format: "av outY inX" or "input X -> output Y" or just "X"
         if (result && result.response) {
           const response = String(result.response).trim();
-          console.log('Parsing matrix response:', response);
 
           // Try OREI format first: "av out1 in3" -> input is 3
           let inputMatch = response.match(/in(\d+)/i);
@@ -305,23 +367,17 @@ class VDAIRRemoteCard extends HTMLElement {
 
           if (inputMatch) {
             const inputNum = inputMatch[1];
-            console.log('Extracted input number:', inputNum);
             // Find the corresponding command
             const matchingCmd = this._matrixInputCommands.find(cmd =>
               cmd.input_value === inputNum || cmd.input_value === String(inputNum)
             );
             if (matchingCmd) {
               this._selectedMatrixInput = matchingCmd.command_id;
-              console.log('Set selected matrix input to:', this._selectedMatrixInput);
               // Load source device for now playing info
               await this._loadSourceDevice();
               // Re-render to update the dropdown
               this._render();
-            } else {
-              console.log('No matching command found for input:', inputNum, 'Available:', this._matrixInputCommands.map(c => c.input_value));
             }
-          } else {
-            console.log('Could not parse input number from response');
           }
         }
       }
@@ -413,7 +469,8 @@ class VDAIRRemoteCard extends HTMLElement {
         });
         if (resp.ok) {
           const data = await resp.json();
-          this._sourceCommands = data.commands || [];
+          // Normalize commands to lowercase for consistent matching
+          this._sourceCommands = (data.commands || []).map(c => c.toLowerCase());
           this._sourceDeviceType = haDevice.device_family;
         }
       } catch (e) {
@@ -1086,11 +1143,17 @@ class VDAIRRemoteCard extends HTMLElement {
               </div>
               ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
                 ${this._commands.includes('power') ? `
-                  <button class="quick-btn power compact ${this._lastSent === 'power' ? 'sent' : ''}"
-                          data-command="power" title="Power">
+                  <button class="quick-btn power compact ${this._lastSent === 'power_' + this._device.device_id ? 'sent' : ''}"
+                          data-command="power" data-device-id="${this._device.device_id}" title="Power ${this._device.name}">
                     ${this._getCommandIcon('power')}
                   </button>
                 ` : ''}
+                ${this._tvDevices.map(tv => `
+                  <button class="quick-btn power compact ${this._lastSent === 'power_tv_' + tv.device_id ? 'sent' : ''}"
+                          data-command="power" data-tv-device-id="${tv.device_id}" title="Power ${tv.name}">
+                    ${this._getCommandIcon('power')}
+                  </button>
+                `).join('')}
                 <select class="matrix-input-select compact" id="matrix-input-dropdown">
                   <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
                   ${this._matrixInputCommands.map(cmd => `
@@ -1098,8 +1161,7 @@ class VDAIRRemoteCard extends HTMLElement {
                       ${this._getMatrixInputDisplayName(cmd)}
                     </option>
                   `).join('')}
-                </select>
-              ` : `
+                </select>` : `
                 ${quickButtons.map(cmd => `
                   <button class="quick-btn compact ${cmd.includes('power') ? 'power' : ''} ${this._lastSent === cmd ? 'sent' : ''}"
                           data-command="${cmd}" title="${this._formatCommand(cmd)}">
@@ -1170,7 +1232,7 @@ class VDAIRRemoteCard extends HTMLElement {
       });
 
       // Repeatable commands (hold to repeat)
-      const repeatableCommands = ['volume_up', 'volume_down', 'channel_up', 'channel_down'];
+      const repeatableCommands = ['volume_up', 'volume_down', 'channel_up', 'channel_down', 'chanup', 'chandown'];
 
       this.shadowRoot.querySelectorAll('[data-command]').forEach(btn => {
         const command = btn.dataset.command;
@@ -1194,10 +1256,24 @@ class VDAIRRemoteCard extends HTMLElement {
           // Normal click
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (isSource && this._sourceDevice) {
+            const targetDeviceId = btn.dataset.deviceId;
+            const tvDeviceId = btn.dataset.tvDeviceId;
+            if (tvDeviceId) {
+              // Send to specific TV device (from tv_devices config)
+              this._sendCommandToDevice(command, tvDeviceId);
+              this._lastSent = 'power_tv_' + tvDeviceId;
+              this._render();
+              setTimeout(() => { this._lastSent = null; this._render(); }, 1000);
+            } else if (targetDeviceId) {
+              // Send to specific device (e.g., additional TV on same output)
+              this._sendCommandToDevice(command, targetDeviceId);
+              this._lastSent = command + '_' + targetDeviceId;
+              this._render();
+              setTimeout(() => { this._lastSent = null; this._render(); }, 1000);
+            } else if (isSource && this._sourceDevice) {
               // Send to source device
               this._sendCommandToDevice(command, this._sourceDevice.device_id);
-            } else if (this._sourceDevice && !btn.dataset.deviceId && !['volume_up', 'volume_down', 'mute'].includes(command)) {
+            } else if (this._sourceDevice && !['volume_up', 'volume_down', 'mute'].includes(command)) {
               // In matrix mode, non-volume commands go to source device
               this._sendCommandToDevice(command, this._sourceDevice.device_id);
             } else {
@@ -1219,6 +1295,10 @@ class VDAIRRemoteCard extends HTMLElement {
       // Matrix input dropdown (in compact view)
       const matrixDropdown = this.shadowRoot.getElementById('matrix-input-dropdown');
       if (matrixDropdown) {
+        // Explicitly set the value to ensure correct selection
+        if (this._selectedMatrixInput) {
+          matrixDropdown.value = this._selectedMatrixInput;
+        }
         matrixDropdown.addEventListener('change', (e) => {
           const commandId = e.target.value;
           if (commandId) {
@@ -1247,7 +1327,7 @@ class VDAIRRemoteCard extends HTMLElement {
       if (this._isHolding) {
         if (command === 'volume_up' || command === 'volume_down') {
           this._startFillAnimation(command);
-        } else if (command === 'channel_up' || command === 'channel_down') {
+        } else if (command === 'channel_up' || command === 'channel_down' || command === 'chanup' || command === 'chandown') {
           this._startFadeAnimation();
         }
       }
@@ -1432,10 +1512,10 @@ class VDAIRRemoteCard extends HTMLElement {
     const tvPowerCmds = tvCommands.filter(c => c.includes('power'));
     const volCmds = tvCommands.filter(c => c.includes('volume') || c === 'mute'); // Volume from TV
     const chanCmds = commands.filter(c => c.includes('channel') || c.includes('chan'));
-    const navCmds = commands.filter(c => ['up', 'down', 'left', 'right', 'enter', 'select', 'back', 'exit', 'menu', 'home', 'guide', 'info'].includes(c));
+    const navCmds = commands.filter(c => ['up', 'down', 'left', 'right', 'enter', 'select', 'center', 'back', 'exit', 'menu', 'home', 'guide', 'info'].includes(c));
     const numCmds = commands.filter(c => /^[0-9]$/.test(c));
     const inputCmds = commands.filter(c => c.includes('hdmi') || c.includes('source') || c.includes('input'));
-    const playCmds = commands.filter(c => ['play', 'pause', 'play_pause', 'stop', 'rewind', 'fast_forward', 'record', 'replay', 'ffwd', 'rew'].includes(c));
+    const playCmds = commands.filter(c => ['play', 'pause', 'play_pause', 'stop', 'rewind', 'fast_forward', 'record', 'replay', 'ffwd', 'rew', 'next', 'previous', 'advance'].includes(c));
 
     // Get now playing info for HA source device
     const nowPlaying = this._getNowPlayingInfo();
@@ -1460,8 +1540,14 @@ class VDAIRRemoteCard extends HTMLElement {
           <div class="power-row dual-power">
             <button class="btn power tv-power" data-command="power" data-device-id="${this._device.device_id}">
               <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
-              <span class="power-label">TV</span>
+              <span class="power-label">${this._device.name.substring(0, 8)}</span>
             </button>
+            ${this._tvDevices.map(tv => `
+              <button class="btn power tv-power" data-command="power" data-tv-device-id="${tv.device_id}">
+                <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
+                <span class="power-label">${tv.name.substring(0, 8)}</span>
+              </button>
+            `).join('')}
             ${powerCmds.includes('power') ? `
               <button class="btn power source-power" data-command="power" data-source="true">
                 <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
@@ -1491,14 +1577,14 @@ class VDAIRRemoteCard extends HTMLElement {
             ${navCmds.includes('up') ? `<button class="btn" data-command="up"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>` : '<div></div>'}
             <div></div>
             ${navCmds.includes('left') ? `<button class="btn" data-command="left"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></button>` : '<div></div>'}
-            ${navCmds.includes('select') || navCmds.includes('enter') ? `<button class="btn ok" data-command="${navCmds.includes('select') ? 'select' : 'enter'}">OK</button>` : '<div></div>'}
+            ${navCmds.includes('select') || navCmds.includes('enter') || navCmds.includes('center') ? `<button class="btn ok" data-command="${navCmds.includes('select') ? 'select' : navCmds.includes('center') ? 'center' : 'enter'}">OK</button>` : '<div></div>'}
             ${navCmds.includes('right') ? `<button class="btn" data-command="right"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></button>` : '<div></div>'}
             <div></div>
             ${navCmds.includes('down') ? `<button class="btn" data-command="down"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>` : '<div></div>'}
             <div></div>
           </div>
           <div class="nav-row">
-            ${navCmds.filter(c => !['up','down','left','right','select','enter'].includes(c)).map(cmd => `
+            ${navCmds.filter(c => !['up','down','left','right','select','enter','center'].includes(c)).map(cmd => `
               <button class="btn" data-command="${cmd}">${this._formatCommand(cmd)}</button>
             `).join('')}
           </div>
@@ -1520,8 +1606,8 @@ class VDAIRRemoteCard extends HTMLElement {
             ${chanCmds.length > 0 ? `
               <div class="chan-group">
                 <div class="section-label">Ch</div>
-                ${chanCmds.includes('channel_up') ? `<button class="btn" data-command="channel_up"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>` : ''}
-                ${chanCmds.includes('channel_down') ? `<button class="btn" data-command="channel_down"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>` : ''}
+                ${chanCmds.some(c => c === 'channel_up' || c === 'chanup') ? `<button class="btn" data-command="${chanCmds.find(c => c === 'channel_up' || c === 'chanup')}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>` : ''}
+                ${chanCmds.some(c => c === 'channel_down' || c === 'chandown') ? `<button class="btn" data-command="${chanCmds.find(c => c === 'channel_down' || c === 'chandown')}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>` : ''}
               </div>
             ` : ''}
           </div>
@@ -1544,12 +1630,12 @@ class VDAIRRemoteCard extends HTMLElement {
       ${playCmds.length > 0 ? `
         <div class="remote-section">
           <div class="playback-row">
-            ${playCmds.includes('rewind') ? `<button class="btn" data-command="rewind"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg></button>` : ''}
+            ${playCmds.some(c => ['rewind', 'rew', 'previous', 'replay'].includes(c)) ? `<button class="btn" data-command="${playCmds.find(c => ['rewind', 'rew', 'previous', 'replay'].includes(c))}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg></button>` : ''}
             ${playCmds.includes('play') ? `<button class="btn" data-command="play"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>` : ''}
             ${playCmds.includes('play_pause') ? `<button class="btn" data-command="play_pause"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>` : ''}
             ${playCmds.includes('pause') ? `<button class="btn" data-command="pause"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></button>` : ''}
             ${playCmds.includes('stop') ? `<button class="btn" data-command="stop"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 6h12v12H6z"/></svg></button>` : ''}
-            ${playCmds.includes('fast_forward') ? `<button class="btn" data-command="fast_forward"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg></button>` : ''}
+            ${playCmds.some(c => ['fast_forward', 'ffwd', 'next', 'advance'].includes(c)) ? `<button class="btn" data-command="${playCmds.find(c => ['fast_forward', 'ffwd', 'next', 'advance'].includes(c))}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg></button>` : ''}
           </div>
         </div>
       ` : ''}
@@ -1723,16 +1809,7 @@ class VDAIRRemoteCard extends HTMLElement {
       if (cmd && cmd._generated && matrixType === 'serial') {
         // Generated command for serial matrix - use routing template
         const template = this._matrixDevice.routing_template;
-        console.log('Matrix routing debug:', {
-          template: template,
-          cmd: cmd,
-          input_value: cmd.input_value,
-          matrix_port: this._device.matrix_port,
-          device: this._device
-        });
-
         if (!template) {
-          console.error('No routing template configured for matrix');
           return;
         }
 
@@ -1743,7 +1820,6 @@ class VDAIRRemoteCard extends HTMLElement {
           .replace('{input}', inputNum)
           .replace('{output}', outputNum);
 
-        console.log('Sending matrix routing command:', rawCommand);
         await this._hass.callService('vda_ir_control', 'send_raw_serial_command', {
           device_id: matrixId,
           payload: rawCommand,
@@ -2045,6 +2121,25 @@ class VDAIRRemoteCardEditor extends HTMLElement {
         <div class="help-text">Leave empty to use device name</div>
       </div>
 
+      ${this._config.device_id && this._devices.length > 1 ? `
+        <div class="form-group">
+          <label>Additional TV Power Buttons</label>
+          <div class="help-text" style="margin-bottom: 8px;">Select other TVs to add power buttons for (e.g., TVs sharing an HDMI splitter)</div>
+          <div style="max-height: 120px; overflow-y: auto; border: 1px solid var(--divider-color); border-radius: 6px; padding: 8px;">
+            ${this._devices.filter(d => d.device_id !== this._config.device_id).map(d => `
+              <div style="padding: 4px 0;">
+                <label style="display: block; cursor: pointer;">
+                  <input type="checkbox" class="tv-device-checkbox" data-device-id="${d.device_id}"
+                         ${(this._config.tv_devices || []).includes(d.device_id) ? 'checked' : ''}
+                         style="margin-right: 8px; vertical-align: middle;">
+                  <span style="vertical-align: middle;">${d.name}${d.location ? ` (${d.location})` : ''}</span>
+                </label>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
       ${this._availableCommands.length > 0 ? `
         <div class="form-group">
           <label>Quick Buttons</label>
@@ -2084,6 +2179,13 @@ class VDAIRRemoteCardEditor extends HTMLElement {
         const checked = Array.from(this.shadowRoot.querySelectorAll('.quick-btn-checkbox:checked'))
           .map(c => c.dataset.command);
         this._updateConfig('quick_buttons', checked.length > 0 ? checked : null);
+      });
+    });
+    this.shadowRoot.querySelectorAll('.tv-device-checkbox').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const checked = Array.from(this.shadowRoot.querySelectorAll('.tv-device-checkbox:checked'))
+          .map(c => c.dataset.deviceId);
+        this._updateConfig('tv_devices', checked.length > 0 ? checked : null);
       });
     });
   }
