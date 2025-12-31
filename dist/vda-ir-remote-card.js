@@ -1,7 +1,8 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.9.0
+ * @version 1.9.1-debug
+ * @build 20231231-matrix-fix
  */
 
 // Global data cache - shared across all card instances to avoid duplicate API calls
@@ -286,7 +287,10 @@ class VDAIRRemoteCard extends HTMLElement {
 
           // Check if this serial device is assigned to a matrix output
           // Need to fetch full matrix details since list API doesn't include device_id in outputs
-          for (const matrix of serialDevices.filter(d => d.device_type === 'hdmi_matrix')) {
+          const matrixDevices = serialDevices.filter(d => d.device_type === 'hdmi_matrix');
+          console.log('[VDA Debug] Looking for matrices. Found:', matrixDevices.length, 'Serial device:', this._serialDevice.device_id);
+          console.log('[VDA Debug] All serial devices:', serialDevices.map(d => ({id: d.device_id, type: d.device_type})));
+          for (const matrix of matrixDevices) {
             // Fetch full matrix details to get device_id assignments
             const matrixDetailResp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrix.device_id)}`, {
               headers: authHeader,
@@ -294,7 +298,9 @@ class VDAIRRemoteCard extends HTMLElement {
             if (matrixDetailResp.ok) {
               const fullMatrix = await matrixDetailResp.json();
               const outputs = fullMatrix.matrix_outputs || [];
+              console.log('[VDA Debug] Matrix:', matrix.device_id, 'Outputs:', outputs.map(o => ({idx: o.index, dev: o.device_id})));
               const outputMatch = outputs.find(o => o.device_id === this._serialDevice.device_id);
+              console.log('[VDA Debug] Looking for device_id:', this._serialDevice.device_id, 'Match:', outputMatch);
               if (outputMatch) {
                 // Found! This serial device is connected to this matrix output
                 this._serialDeviceMatrixId = matrix.device_id;
