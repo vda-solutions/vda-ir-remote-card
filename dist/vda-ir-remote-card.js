@@ -1378,10 +1378,13 @@ class VDAIRRemoteCard extends HTMLElement {
               <div class="group-status">${this._groupPowerStatus}</div>
             ` : ''}
           </div>
-        ` : this._isSerialDevice && this._serialDevice ? `
+        ` : this._isSerialDevice && this._serialDevice ? (() => {
+          console.log('[VDA Render] Serial device render. matrixDevice:', !!this._matrixDevice, 'inputCommands:', this._matrixInputCommands?.length);
+          return `
           <div class="card-content">
             <div class="card-header">
-              <span class="device-icon">${this._getSerialDeviceIcon()}</span>
+              <span class="device-icon">${this._getSerialDeviceIcon()}</span>`;
+        })() + `
               <div style="flex:1">
                 <div class="device-name">${this._config.name || this._serialDevice.name}</div>
                 ${this._serialDevice.location ? `<div class="device-location">${this._serialDevice.location}</div>` : ''}
