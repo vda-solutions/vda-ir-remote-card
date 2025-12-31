@@ -263,15 +263,27 @@ class VDAIRRemoteCard extends HTMLElement {
         }
       }
 
-      // Load serial device commands
+      // Load serial device commands (need to fetch individual device for full command data)
       if (this._isSerialDevice && this._serialDevice) {
-        const commands = this._serialDevice.commands || {};
-        this._serialCommands = Object.keys(commands).map(cmdId => ({
-          command_id: cmdId,
-          name: commands[cmdId].name || cmdId,
-          ...commands[cmdId]
-        }));
-        console.log('Serial device loaded:', this._serialDevice.name, 'Commands:', this._serialCommands.length, this._serialCommands.map(c => c.command_id));
+        try {
+          const detailResp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(this._serialDevice.device_id)}`, {
+            headers: authHeader,
+          });
+          if (detailResp.ok) {
+            const fullDevice = await detailResp.json();
+            this._serialDevice = fullDevice;
+            const commands = fullDevice.commands || {};
+            this._serialCommands = Object.keys(commands).map(cmdId => ({
+              command_id: cmdId,
+              name: commands[cmdId].name || cmdId,
+              ...commands[cmdId]
+            }));
+            console.log('Serial device loaded:', this._serialDevice.name, 'Commands:', this._serialCommands.length, this._serialCommands.map(c => c.command_id));
+          }
+        } catch (e) {
+          console.error('Failed to load serial device details:', e);
+          this._serialCommands = [];
+        }
       } else {
         this._serialCommands = [];
         if (this._isSerialDevice) {
