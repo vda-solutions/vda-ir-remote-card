@@ -113,6 +113,11 @@ class VDAIRRemoteCard extends HTMLElement {
     this._outputDevices = [];
     // TV devices configured in card config (for power buttons)
     this._tvDevices = [];
+    // Serial devices
+    this._isSerialDevice = false;
+    this._serialDevice = null;
+    this._serialDevices = [];
+    this._serialCommands = [];
   }
 
   set hass(hass) {
@@ -266,8 +271,12 @@ class VDAIRRemoteCard extends HTMLElement {
           name: commands[cmdId].name || cmdId,
           ...commands[cmdId]
         }));
+        console.log('Serial device loaded:', this._serialDevice.name, 'Commands:', this._serialCommands.length, this._serialCommands.map(c => c.command_id));
       } else {
         this._serialCommands = [];
+        if (this._isSerialDevice) {
+          console.warn('Serial device flag set but device not found. Config device_id:', this._config.device_id);
+        }
       }
 
       this._render();
@@ -1194,7 +1203,7 @@ class VDAIRRemoteCard extends HTMLElement {
                 <div class="device-name">${this._config.name || this._serialDevice.name}</div>
                 ${this._serialDevice.location ? `<div class="device-location">${this._serialDevice.location}</div>` : ''}
               </div>
-              ${this._serialCommands.some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
+              ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
                 <button class="quick-btn power compact ${this._lastSent === 'serial_power' ? 'sent' : ''}"
                         data-serial-command="power_on" title="Power">
                   ${this._getCommandIcon('power')}
@@ -1219,7 +1228,7 @@ class VDAIRRemoteCard extends HTMLElement {
                   </div>
 
                   <div class="remote-body">
-                    ${this._serialCommands.some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
+                    ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
                       <div class="remote-section">
                         <div class="power-row">
                           <button class="btn power ${this._lastSent === 'power_on' ? 'sent' : ''}"
@@ -1233,7 +1242,7 @@ class VDAIRRemoteCard extends HTMLElement {
                     <div class="remote-section">
                       <div class="section-label">Commands</div>
                       <div class="input-row">
-                        ${this._serialCommands.filter(c => !c.command_id.startsWith('power_')).map(cmd => `
+                        ${(this._serialCommands || []).filter(c => !c.command_id.startsWith('power_')).map(cmd => `
                           <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
                                   data-serial-command="${cmd.command_id}">${cmd.name}</button>
                         `).join('')}
