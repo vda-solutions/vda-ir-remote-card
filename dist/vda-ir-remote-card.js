@@ -118,6 +118,9 @@ class VDAIRRemoteCard extends HTMLElement {
     this._serialDevice = null;
     this._serialDevices = [];
     this._serialCommands = [];
+    // Serial device matrix linking
+    this._serialDeviceMatrixId = null;
+    this._serialDeviceMatrixPort = null;
   }
 
   set hass(hass) {
@@ -280,6 +283,22 @@ class VDAIRRemoteCard extends HTMLElement {
             }));
             console.log('Serial device loaded:', this._serialDevice.name, 'Commands:', this._serialCommands.length, this._serialCommands.map(c => c.command_id));
           }
+
+          // Check if this serial device is assigned to a matrix output
+          // Look through all serial matrices to find if this device is an output
+          for (const matrix of serialDevices.filter(d => d.device_type === 'hdmi_matrix')) {
+            const outputs = matrix.matrix_outputs || [];
+            const outputMatch = outputs.find(o => o.device_id === this._serialDevice.device_id);
+            if (outputMatch) {
+              // Found! This serial device is connected to this matrix output
+              this._serialDeviceMatrixId = matrix.device_id;
+              this._serialDeviceMatrixPort = outputMatch.index;
+              console.log('Serial device connected to matrix:', matrix.device_id, 'port:', outputMatch.index);
+              // Load full matrix details for input commands
+              await this._loadMatrixForSerialDevice(matrix.device_id, authHeader);
+              break;
+            }
+          }
         } catch (e) {
           console.error('Failed to load serial device details:', e);
           this._serialCommands = [];
@@ -380,6 +399,132 @@ class VDAIRRemoteCard extends HTMLElement {
       this._matrixDevice = null;
       this._matrixInputCommands = [];
     }
+  }
+
+  async _loadMatrixForSerialDevice(matrixId, authHeader) {
+    // Load matrix details for a serial device that's connected to a matrix output
+    try {
+      const matrixResp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrixId)}`, {
+        headers: authHeader,
+      });
+
+      if (matrixResp.ok) {
+        this._matrixDevice = await matrixResp.json();
+
+        // Build input commands from matrix_inputs
+        const matrixInputs = this._matrixDevice.matrix_inputs || [];
+        this._matrixInputCommands = matrixInputs
+          .filter(input => input.enabled !== false)
+          .map(input => ({
+            command_id: `route_input_${input.index}`,
+            name: input.name || `Input ${input.index}`,
+            input_value: String(input.index),
+            device_id: input.device_id,
+            _generated: true
+          }));
+
+        console.log('Matrix loaded for serial device:', this._matrixDevice.name, 'inputs:', this._matrixInputCommands.length);
+
+        // Query current routing state (non-blocking)
+        this._queryMatrixRoutingForSerial().then(() => {
+          if (this._selectedMatrixInput) {
+            this._render();
+          }
+        }).catch(e => console.warn('Matrix query for serial device failed:', e));
+      }
+    } catch (e) {
+      console.error('Failed to load matrix for serial device:', e);
+    }
+  }
+
+  async _queryMatrixRoutingForSerial() {
+    // Query current routing for serial device's matrix output
+    if (!this._matrixDevice || !this._serialDeviceMatrixPort) return;
+
+    const queryTemplate = this._matrixDevice.query_template;
+    if (!queryTemplate) return;
+
+    const outputNum = this._serialDeviceMatrixPort;
+    const matrixId = this._serialDeviceMatrixId;
+    const queryCmd = queryTemplate.replace('{output}', outputNum);
+
+    try {
+      const result = await VDAMatrixQueryQueue.enqueue(async () => {
+        const resp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrixId)}/send`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            command: queryCmd,
+            wait_response: true,
+            timeout: 2,
+          }),
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          return data.response;
+        }
+        return null;
+      });
+
+      if (result) {
+        // Parse response like "av out 9 in 3"
+        const match = result.match(/av out \d+ in (\d+)/i);
+        if (match) {
+          const inputNum = match[1];
+          this._selectedMatrixInput = `route_input_${inputNum}`;
+          // Load the source device based on selected input
+          await this._loadSourceDeviceForSerial();
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to query matrix routing for serial device:', e);
+    }
+  }
+
+  async _loadSourceDeviceForSerial() {
+    // Load the source device for serial device's selected matrix input
+    if (!this._selectedMatrixInput || !this._matrixInputCommands) {
+      this._sourceDevice = null;
+      this._sourceCommands = [];
+      return;
+    }
+
+    const selectedCmd = this._matrixInputCommands.find(c => c.command_id === this._selectedMatrixInput);
+    if (!selectedCmd || !selectedCmd.device_id) {
+      this._sourceDevice = null;
+      this._sourceCommands = [];
+      return;
+    }
+
+    // Find source device in controlled devices, HA devices, or serial devices
+    const sourceDeviceId = selectedCmd.device_id;
+
+    // Check IR controlled devices
+    let sourceDevice = this._allDevices.find(d => d.device_id === sourceDeviceId);
+    if (sourceDevice) {
+      this._sourceDevice = sourceDevice;
+      this._sourceIsHADevice = false;
+      // Load source device commands
+      await this._loadSourceCommands();
+      return;
+    }
+
+    // Check HA devices
+    const haDevice = this._haDevices.find(d => d.device_id === sourceDeviceId);
+    if (haDevice) {
+      this._sourceDevice = haDevice;
+      this._sourceIsHADevice = true;
+      this._sourceMediaPlayerEntity = haDevice.media_player_entity;
+      this._sourceCommands = [];
+      return;
+    }
+
+    this._sourceDevice = null;
+    this._sourceCommands = [];
   }
 
   async _queryMatrixRouting() {
@@ -1216,10 +1361,20 @@ class VDAIRRemoteCard extends HTMLElement {
                 ${this._serialDevice.location ? `<div class="device-location">${this._serialDevice.location}</div>` : ''}
               </div>
               ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
-                <button class="quick-btn power compact ${this._lastSent === 'serial_power' ? 'sent' : ''}"
-                        data-serial-command="power_on" title="Power">
+                <button class="quick-btn power compact ${this._lastSent === 'power_on' ? 'sent' : ''}"
+                        data-serial-command="power_on" title="Power ${this._serialDevice.name}">
                   ${this._getCommandIcon('power')}
                 </button>
+              ` : ''}
+              ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
+                <select class="matrix-input-select compact" id="serial-matrix-input-dropdown">
+                  <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
+                  ${this._matrixInputCommands.map(cmd => `
+                    <option value="${cmd.command_id}" ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}>
+                      ${cmd.name}
+                    </option>
+                  `).join('')}
+                </select>
               ` : ''}
               <button class="expand-btn" id="open-serial-remote">Remote</button>
             </div>
@@ -1228,7 +1383,7 @@ class VDAIRRemoteCard extends HTMLElement {
               <div class="modal-overlay" id="modal-overlay">
                 <div class="modal" onclick="event.stopPropagation()">
                   <div class="modal-header">
-                    <span class="modal-title">${this._config.name || this._serialDevice.name}</span>
+                    <span class="modal-title">${this._sourceDevice ? `${this._config.name || this._serialDevice.name} → ${this._sourceDevice.name}` : (this._config.name || this._serialDevice.name)}</span>
                     <button class="close-btn" id="close-modal">✕</button>
                   </div>
 
@@ -1251,15 +1406,41 @@ class VDAIRRemoteCard extends HTMLElement {
                       </div>
                     ` : ''}
 
-                    <div class="remote-section">
-                      <div class="section-label">Commands</div>
-                      <div class="input-row">
-                        ${(this._serialCommands || []).filter(c => !c.command_id.startsWith('power_')).map(cmd => `
-                          <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
-                                  data-serial-command="${cmd.command_id}">${cmd.name}</button>
-                        `).join('')}
+                    ${this._sourceDevice && !this._sourceIsHADevice ? this._renderSourceRemoteContent() : ''}
+                    ${this._sourceDevice && this._sourceIsHADevice ? this._renderHADeviceRemote() : ''}
+
+                    ${!this._sourceDevice && this._matrixDevice ? `
+                      <div class="remote-section">
+                        <div class="section-label">Select Source</div>
+                        <p style="color: var(--secondary-text-color); font-size: 12px; text-align: center;">
+                          Select an input to show source controls
+                        </p>
                       </div>
-                    </div>
+                    ` : ''}
+
+                    ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
+                      <div class="remote-section matrix-input-section">
+                        <div class="section-label">Matrix Input</div>
+                        <div class="matrix-input-row">
+                          ${this._matrixInputCommands.map(cmd => `
+                            <button class="btn matrix-input-btn ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}"
+                                    data-serial-matrix-input="${cmd.command_id}" data-input-value="${cmd.input_value}">
+                              ${cmd.name}
+                            </button>
+                          `).join('')}
+                        </div>
+                      </div>
+                    ` : `
+                      <div class="remote-section">
+                        <div class="section-label">Device Commands</div>
+                        <div class="input-row">
+                          ${(this._serialCommands || []).filter(c => !c.command_id.startsWith('power_')).map(cmd => `
+                            <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
+                                    data-serial-command="${cmd.command_id}">${cmd.name}</button>
+                          `).join('')}
+                        </div>
+                      </div>
+                    `}
                   </div>
                 </div>
               </div>
@@ -1344,7 +1525,11 @@ class VDAIRRemoteCard extends HTMLElement {
 
     // Add event listeners for serial devices
     if (this._isSerialDevice && this._serialDevice) {
-      this.shadowRoot.getElementById('open-serial-remote')?.addEventListener('click', () => {
+      this.shadowRoot.getElementById('open-serial-remote')?.addEventListener('click', async () => {
+        // Load source device if matrix is connected
+        if (this._matrixDevice && this._selectedMatrixInput) {
+          await this._loadSourceDeviceForSerial();
+        }
         this._showRemote = true;
         this._render();
       });
@@ -1363,6 +1548,29 @@ class VDAIRRemoteCard extends HTMLElement {
         btn.addEventListener('click', async () => {
           const commandId = btn.dataset.serialCommand;
           await this._sendSerialCommand(commandId);
+        });
+      });
+      // Compact matrix input dropdown
+      this.shadowRoot.getElementById('serial-matrix-input-dropdown')?.addEventListener('change', async (e) => {
+        const commandId = e.target.value;
+        if (commandId) {
+          await this._sendSerialMatrixInput(commandId);
+        }
+      });
+      // Modal matrix input buttons
+      this.shadowRoot.querySelectorAll('[data-serial-matrix-input]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const commandId = btn.dataset.serialMatrixInput;
+          await this._sendSerialMatrixInput(commandId);
+        });
+      });
+      // Source device command buttons (for IR source devices)
+      this.shadowRoot.querySelectorAll('[data-source-command]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const command = btn.dataset.sourceCommand;
+          if (this._sourceDevice && !this._sourceIsHADevice) {
+            await this._sendCommandToDevice(command, this._sourceDevice.device_id);
+          }
         });
       });
     }
@@ -1885,6 +2093,58 @@ class VDAIRRemoteCard extends HTMLElement {
     }
   }
 
+  async _sendSerialMatrixInput(commandId) {
+    // Send matrix routing command for serial device
+    if (!this._matrixDevice || !this._serialDeviceMatrixPort) return;
+
+    const selectedCmd = this._matrixInputCommands.find(c => c.command_id === commandId);
+    if (!selectedCmd) return;
+
+    const inputNum = selectedCmd.input_value;
+    const outputNum = this._serialDeviceMatrixPort;
+    const matrixId = this._serialDeviceMatrixId;
+
+    // Use routing template
+    const routingTemplate = this._matrixDevice.routing_template;
+    if (!routingTemplate) {
+      console.error('No routing template configured for matrix');
+      return;
+    }
+
+    const routeCmd = routingTemplate.replace('{input}', inputNum).replace('{output}', outputNum);
+
+    try {
+      const resp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrixId)}/send`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          command: routeCmd,
+          wait_response: true,
+          timeout: 2,
+        }),
+      });
+
+      if (resp.ok) {
+        this._selectedMatrixInput = commandId;
+        await this._loadSourceDeviceForSerial();
+        this._lastSent = `Matrix: ${selectedCmd.name}`;
+        this._render();
+
+        setTimeout(() => {
+          if (this._lastSent === `Matrix: ${selectedCmd.name}`) {
+            this._lastSent = null;
+            this._render();
+          }
+        }, 2000);
+      }
+    } catch (e) {
+      console.error('Failed to send matrix routing command:', e);
+    }
+  }
+
   async _sendGroupPowerCommand() {
     if (!this._deviceGroup || !this._groupMemberDevices.length) return;
 
@@ -2058,6 +2318,112 @@ class VDAIRRemoteCard extends HTMLElement {
       stop: 'Stop', rewind: 'Rewind', fast_forward: 'FF',
     };
     return names[cmd] || cmd.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  }
+
+  _renderSourceRemoteContent() {
+    // Render source device remote controls for serial device card
+    if (!this._sourceDevice || !this._sourceCommands || this._sourceCommands.length === 0) {
+      return '';
+    }
+
+    const commands = this._sourceCommands;
+    const navCmds = commands.filter(c => ['up', 'down', 'left', 'right', 'enter', 'select', 'center', 'back', 'exit', 'menu', 'home', 'guide', 'info'].includes(c));
+    const volCmds = commands.filter(c => c.includes('volume') || c === 'mute');
+    const chanCmds = commands.filter(c => c.includes('channel') || c.includes('chan'));
+    const numCmds = commands.filter(c => /^[0-9]$/.test(c));
+    const playCmds = commands.filter(c => ['play', 'pause', 'play_pause', 'stop', 'rewind', 'fast_forward', 'ffwd', 'rew', 'next', 'previous'].includes(c));
+
+    return `
+      <!-- Navigation D-Pad -->
+      ${navCmds.length > 0 ? `
+        <div class="remote-section">
+          <div class="dpad">
+            <div></div>
+            ${navCmds.includes('up') ? `<button class="btn" data-source-command="up"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>` : '<div></div>'}
+            <div></div>
+            ${navCmds.includes('left') ? `<button class="btn" data-source-command="left"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></button>` : '<div></div>'}
+            ${navCmds.includes('select') || navCmds.includes('enter') || navCmds.includes('center') ? `<button class="btn ok" data-source-command="${navCmds.includes('select') ? 'select' : navCmds.includes('center') ? 'center' : 'enter'}">OK</button>` : '<div></div>'}
+            ${navCmds.includes('right') ? `<button class="btn" data-source-command="right"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></button>` : '<div></div>'}
+            <div></div>
+            ${navCmds.includes('down') ? `<button class="btn" data-source-command="down"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>` : '<div></div>'}
+            <div></div>
+          </div>
+          <div class="nav-extras">
+            ${navCmds.includes('back') ? `<button class="btn" data-source-command="back"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg> Back</button>` : ''}
+            ${navCmds.includes('menu') ? `<button class="btn" data-source-command="menu">Menu</button>` : ''}
+            ${navCmds.includes('home') ? `<button class="btn" data-source-command="home"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg></button>` : ''}
+            ${navCmds.includes('guide') ? `<button class="btn" data-source-command="guide">Guide</button>` : ''}
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Volume & Channel -->
+      ${volCmds.length > 0 || chanCmds.length > 0 ? `
+        <div class="remote-section">
+          <div class="vol-chan">
+            ${volCmds.length > 0 ? `
+              <div class="vol-group">
+                <button class="btn" data-source-command="volume_up">Vol +</button>
+                ${volCmds.includes('mute') ? `<button class="btn" data-source-command="mute">Mute</button>` : ''}
+                <button class="btn" data-source-command="volume_down">Vol -</button>
+              </div>
+            ` : ''}
+            ${chanCmds.length > 0 ? `
+              <div class="chan-group">
+                <button class="btn" data-source-command="${chanCmds.includes('channel_up') ? 'channel_up' : 'chanup'}">Ch +</button>
+                <button class="btn" data-source-command="${chanCmds.includes('channel_down') ? 'channel_down' : 'chandown'}">Ch -</button>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Number Pad -->
+      ${numCmds.length > 0 ? `
+        <div class="remote-section">
+          <div class="numpad">
+            ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', ''].map(n =>
+              n ? `<button class="btn" data-source-command="${n}">${n}</button>` : '<div></div>'
+            ).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Playback Controls -->
+      ${playCmds.length > 0 ? `
+        <div class="remote-section">
+          <div class="playback-row">
+            ${playCmds.includes('rewind') || playCmds.includes('rew') ? `<button class="btn" data-source-command="${playCmds.includes('rewind') ? 'rewind' : 'rew'}">⏪</button>` : ''}
+            ${playCmds.includes('play_pause') ? `<button class="btn" data-source-command="play_pause">⏯</button>` :
+              (playCmds.includes('play') ? `<button class="btn" data-source-command="play">▶</button>` : '')}
+            ${playCmds.includes('pause') && !playCmds.includes('play_pause') ? `<button class="btn" data-source-command="pause">⏸</button>` : ''}
+            ${playCmds.includes('stop') ? `<button class="btn" data-source-command="stop">⏹</button>` : ''}
+            ${playCmds.includes('fast_forward') || playCmds.includes('ffwd') ? `<button class="btn" data-source-command="${playCmds.includes('fast_forward') ? 'fast_forward' : 'ffwd'}">⏩</button>` : ''}
+          </div>
+        </div>
+      ` : ''}
+    `;
+  }
+
+  _renderHADeviceRemote() {
+    // Render HA device (Apple TV, Roku, etc.) remote controls
+    if (!this._sourceDevice || !this._sourceIsHADevice) {
+      return '';
+    }
+
+    // HA devices use media_player services, not IR commands
+    // Just show basic media controls
+    return `
+      <div class="remote-section">
+        <div class="section-label">${this._sourceDevice.name}</div>
+        <div class="nav-extras" style="justify-content: center;">
+          <button class="btn" data-ha-command="media_play_pause">⏯ Play/Pause</button>
+        </div>
+        <p style="color: var(--secondary-text-color); font-size: 11px; text-align: center; margin-top: 8px;">
+          Use the Home Assistant media player card for full controls
+        </p>
+      </div>
+    `;
   }
 
   _renderCompactNowPlaying() {
