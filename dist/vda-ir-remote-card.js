@@ -268,6 +268,13 @@ class VDAIRRemoteCard extends HTMLElement {
         }
       }
 
+      // Load TV devices for serial device cards too
+      if (this._isSerialDevice && this._config.tv_devices && Array.isArray(this._config.tv_devices)) {
+        this._tvDevices = this._config.tv_devices
+          .map(tvId => allDevices.find(d => d.device_id === tvId))
+          .filter(d => d !== null && d !== undefined);
+      }
+
       // Load serial device commands (need to fetch individual device for full command data)
       if (this._isSerialDevice && this._serialDevice) {
         try {
@@ -1432,6 +1439,12 @@ class VDAIRRemoteCard extends HTMLElement {
                   ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(dev.name || dev.device_id)}</span>
                 </button>`;
               }).join('')}
+              ${(this._tvDevices || []).map(tv => `
+                <button class="quick-btn power compact labeled ${this._lastSent === 'power_tv_' + tv.device_id ? 'sent' : ''}"
+                        data-command="power" data-tv-device-id="${tv.device_id}" title="Power ${tv.name}">
+                  ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(tv.name)}</span>
+                </button>
+              `).join('')}
               ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
                 <select class="matrix-input-select compact" id="serial-matrix-input-dropdown">
                   <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
@@ -1662,6 +1675,23 @@ class VDAIRRemoteCard extends HTMLElement {
             }
           } catch (e) {
             console.error('Failed to send power command:', e);
+          }
+          setTimeout(() => { this._lastSent = null; this._render(); }, 1000);
+        });
+      });
+      // TV device power buttons (from tv_devices config)
+      this.shadowRoot.querySelectorAll('[data-tv-device-id]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const tvDeviceId = btn.dataset.tvDeviceId;
+          this._lastSent = 'power_tv_' + tvDeviceId;
+          this._render();
+          try {
+            await this._hass.callService('vda_ir_control', 'send_ir_code', {
+              device_id: tvDeviceId,
+              command: 'power',
+            });
+          } catch (e) {
+            console.error('Failed to send TV power command:', e);
           }
           setTimeout(() => { this._lastSent = null; this._render(); }, 1000);
         });
@@ -2821,12 +2851,12 @@ class VDAIRRemoteCardEditor extends HTMLElement {
         <div class="help-text">Leave empty to use device name</div>
       </div>
 
-      ${this._config.device_id && this._devices.length > 1 ? `
+      ${this._config.device_id && (this._devices.length > 1 || (this._config.device_id.startsWith('serial:') && this._devices.length > 0)) ? `
         <div class="form-group">
           <label>Additional TV Power Buttons</label>
           <div class="help-text" style="margin-bottom: 8px;">Select other TVs to add power buttons for (e.g., TVs sharing an HDMI splitter)</div>
           <div style="max-height: 120px; overflow-y: auto; border: 1px solid var(--divider-color); border-radius: 6px; padding: 8px;">
-            ${this._devices.filter(d => d.device_id !== this._config.device_id).map(d => `
+            ${this._devices.filter(d => d.device_id !== this._config.device_id && d.device_id !== this._config.device_id.replace('serial:', '')).map(d => `
               <div style="padding: 4px 0;">
                 <label style="display: block; cursor: pointer;">
                   <input type="checkbox" class="tv-device-checkbox" data-device-id="${d.device_id}"
