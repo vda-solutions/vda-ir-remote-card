@@ -2000,6 +2000,7 @@ class VDAIRRemoteCardEditor extends HTMLElement {
     this._config = {};
     this._devices = [];
     this._deviceGroups = [];
+    this._serialDevices = [];
     this._availableCommands = [];
   }
 
@@ -2018,26 +2019,30 @@ class VDAIRRemoteCardEditor extends HTMLElement {
     if (!this._hass) return;
 
     try {
-      // Load devices
-      const devicesResp = await fetch('/api/vda_ir_control/devices', {
-        headers: {
-          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-        },
-      });
+      const authHeader = { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` };
+
+      // Load all device types in parallel
+      const [devicesResp, groupsResp, serialResp] = await Promise.all([
+        fetch('/api/vda_ir_control/devices', { headers: authHeader }),
+        fetch('/api/vda_ir_control/device_groups', { headers: authHeader }),
+        fetch('/api/vda_ir_control/serial_devices', { headers: authHeader }),
+      ]);
+
       if (devicesResp.ok) {
         const data = await devicesResp.json();
         this._devices = data.devices || [];
       }
 
-      // Load device groups
-      const groupsResp = await fetch('/api/vda_ir_control/device_groups', {
-        headers: {
-          'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-        },
-      });
       if (groupsResp.ok) {
         const data = await groupsResp.json();
         this._deviceGroups = data.groups || [];
+      }
+
+      if (serialResp.ok) {
+        const data = await serialResp.json();
+        this._serialDevices = data.devices || [];
+      } else {
+        this._serialDevices = [];
       }
 
       // Load commands for currently selected device
@@ -2133,9 +2138,18 @@ class VDAIRRemoteCardEditor extends HTMLElement {
             </optgroup>
           ` : ''}
           ${this._devices.length > 0 ? `
-            <optgroup label="Individual Devices">
+            <optgroup label="IR Devices">
               ${this._devices.map(d => `
                 <option value="${d.device_id}" ${this._config.device_id === d.device_id ? 'selected' : ''}>
+                  ${d.name} ${d.location ? `(${d.location})` : ''}
+                </option>
+              `).join('')}
+            </optgroup>
+          ` : ''}
+          ${this._serialDevices && this._serialDevices.length > 0 ? `
+            <optgroup label="Serial Devices">
+              ${this._serialDevices.map(d => `
+                <option value="serial:${d.device_id}" ${this._config.device_id === `serial:${d.device_id}` ? 'selected' : ''}>
                   ${d.name} ${d.location ? `(${d.location})` : ''}
                 </option>
               `).join('')}
