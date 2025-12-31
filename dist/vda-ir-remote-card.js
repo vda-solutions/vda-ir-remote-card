@@ -318,9 +318,9 @@ class VDAIRRemoteCard extends HTMLElement {
                 console.log('Matrix inputs loaded:', this._matrixInputCommands.length);
 
                 // Find other devices sharing the same matrix output (for splitter scenarios)
-                // Check IR devices
+                // Check IR devices (matrix_port is stored as string, outputMatch.index is number)
                 const irDevicesOnOutput = allDevices.filter(d =>
-                  d.matrix_port === outputMatch.index &&
+                  String(d.matrix_port) === String(outputMatch.index) &&
                   d.matrix_device_id === matrix.device_id
                 );
                 // Check other serial devices on the same output (excluding self and matrix)
