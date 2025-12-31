@@ -322,9 +322,14 @@ class VDAIRRemoteCard extends HTMLElement {
         this._haDevices = [];
       }
 
-      // Query current matrix routing state
+      // Query current matrix routing state (non-blocking - don't wait for it)
       if (this._matrixDevice && this._device.matrix_port) {
-        await this._queryMatrixRouting();
+        // Don't await - let it run in background and re-render when done
+        this._queryMatrixRouting().then(() => {
+          if (this._selectedMatrixInput) {
+            this._render();
+          }
+        }).catch(e => console.warn('Matrix query failed:', e));
       }
     } catch (e) {
       console.error('Failed to load matrix device:', e);
@@ -347,29 +352,33 @@ class VDAIRRemoteCard extends HTMLElement {
     }
 
     const outputNum = this._device.matrix_port;
+    const matrixId = this._device.matrix_device_id;
+    const cacheKey = `matrix_routing_${matrixId}_${outputNum}`;
     const queryCmd = queryTemplate.replace('{output}', outputNum);
 
     try {
-      // Use queue to prevent multiple cards from overwhelming serial device
-      const result = await VDAMatrixQueryQueue.enqueue(async () => {
-        const resp = await fetch(`/api/vda_ir_control/serial_devices/${this._device.matrix_device_id}/send`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            payload: queryCmd,
-            format: 'text',
-            line_ending: 'cr',
-            wait_for_response: true,
-            timeout: 2.0,
-          }),
+      // Use cache with queue to prevent duplicate queries
+      const result = await VDADataCache.fetch(cacheKey, async () => {
+        return VDAMatrixQueryQueue.enqueue(async () => {
+          const resp = await fetch(`/api/vda_ir_control/serial_devices/${matrixId}/send`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              payload: queryCmd,
+              format: 'text',
+              line_ending: 'none',
+              wait_for_response: true,
+              timeout: 1.0,  // Reduced from 2s
+            }),
+          });
+          if (resp.ok) {
+            return await resp.json();
+          }
+          return null;
         });
-        if (resp.ok) {
-          return await resp.json();
-        }
-        return null;
       });
 
       if (result) {
