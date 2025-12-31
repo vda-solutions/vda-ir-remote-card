@@ -1,8 +1,45 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.8.0
+ * @version 1.9.0
  */
+
+// Global data cache - shared across all card instances to avoid duplicate API calls
+const VDADataCache = {
+  _data: {},
+  _loading: {},
+  _ttl: 5000, // Cache for 5 seconds
+
+  async fetch(key, fetchFn) {
+    const now = Date.now();
+    // Return cached data if fresh
+    if (this._data[key] && (now - this._data[key].timestamp) < this._ttl) {
+      return this._data[key].value;
+    }
+    // If already loading, wait for it
+    if (this._loading[key]) {
+      return this._loading[key];
+    }
+    // Start loading
+    this._loading[key] = fetchFn().then(value => {
+      this._data[key] = { value, timestamp: Date.now() };
+      delete this._loading[key];
+      return value;
+    }).catch(e => {
+      delete this._loading[key];
+      throw e;
+    });
+    return this._loading[key];
+  },
+
+  invalidate(key) {
+    delete this._data[key];
+  },
+
+  invalidateAll() {
+    this._data = {};
+  }
+};
 
 // Global query queue to prevent multiple cards from overwhelming the serial device
 const VDAMatrixQueryQueue = {
@@ -133,52 +170,45 @@ class VDAIRRemoteCard extends HTMLElement {
     if (!this._hass || !this._config.device_id) return;
 
     try {
-      // Fetch all data in parallel for speed
-      const [groupsResp, devicesResp, serialResp, haDevicesResp] = await Promise.all([
-        fetch('/api/vda_ir_control/device_groups', {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+      const authHeader = { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` };
+
+      // Use global cache - only first card makes actual API calls, others get cached data
+      const [groupsData, devicesData, serialData, haData] = await Promise.all([
+        VDADataCache.fetch('device_groups', async () => {
+          const resp = await fetch('/api/vda_ir_control/device_groups', { headers: authHeader });
+          return resp.ok ? resp.json() : { groups: [] };
         }),
-        fetch('/api/vda_ir_control/devices', {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        VDADataCache.fetch('devices', async () => {
+          const resp = await fetch('/api/vda_ir_control/devices', { headers: authHeader });
+          return resp.ok ? resp.json() : { devices: [] };
         }),
-        fetch('/api/vda_ir_control/serial_devices', {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        VDADataCache.fetch('serial_devices', async () => {
+          const resp = await fetch('/api/vda_ir_control/serial_devices', { headers: authHeader });
+          return resp.ok ? resp.json() : { devices: [] };
         }),
-        fetch('/api/vda_ir_control/ha_devices', {
-          headers: { 'Authorization': `Bearer ${this._hass.auth.data.access_token}` },
+        VDADataCache.fetch('ha_devices', async () => {
+          const resp = await fetch('/api/vda_ir_control/ha_devices', { headers: authHeader });
+          return resp.ok ? resp.json() : { devices: [] };
         }),
       ]);
 
       // Process groups
-      if (groupsResp.ok) {
-        const groupsData = await groupsResp.json();
-        this._deviceGroup = (groupsData.groups || []).find(g => g.group_id === this._config.device_id);
-        this._isDeviceGroup = !!this._deviceGroup;
-      }
+      const groups = groupsData.groups || [];
+      this._deviceGroup = groups.find(g => g.group_id === this._config.device_id);
+      this._isDeviceGroup = !!this._deviceGroup;
 
       // Process devices
-      let allDevices = [];
-      if (devicesResp.ok) {
-        const data = await devicesResp.json();
-        allDevices = data.devices || [];
-        this._allDevices = allDevices;
-        if (!this._isDeviceGroup) {
-          this._device = allDevices.find(d => d.device_id === this._config.device_id);
-        }
+      const allDevices = devicesData.devices || [];
+      this._allDevices = allDevices;
+      if (!this._isDeviceGroup) {
+        this._device = allDevices.find(d => d.device_id === this._config.device_id);
       }
 
       // Process serial devices
-      let serialDevices = [];
-      if (serialResp.ok) {
-        const serialData = await serialResp.json();
-        serialDevices = serialData.devices || [];
-      }
+      const serialDevices = serialData.devices || [];
 
       // Process HA devices
-      if (haDevicesResp.ok) {
-        const haData = await haDevicesResp.json();
-        this._haDevices = haData.devices || [];
-      }
+      this._haDevices = haData.devices || [];
 
       // If this is a device group, load member device info
       if (this._isDeviceGroup && this._deviceGroup.members) {
