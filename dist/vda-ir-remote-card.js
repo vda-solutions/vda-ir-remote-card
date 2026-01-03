@@ -1,7 +1,7 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.9.2
+ * @version 1.9.12
  */
 
 // Global data cache - shared across all card instances to avoid duplicate API calls
@@ -123,6 +123,11 @@ class VDAIRRemoteCard extends HTMLElement {
     this._serialDeviceMatrixPort = null;
     // Other devices sharing the same matrix output (for power buttons)
     this._serialOutputDevices = [];
+    // Channel number buffer
+    this._channelBuffer = '';
+    this._channelBufferTimeout = null;
+    this._channelBufferDelay = 1500; // ms to wait before sending
+    this._channelDigitDelay = 200; // ms between each digit
   }
 
   set hass(hass) {
@@ -338,8 +343,13 @@ class VDAIRRemoteCard extends HTMLElement {
                 this._serialOutputDevices = [...irDevicesOnOutput, ...serialDevicesOnOutput];
                 console.log('Other devices on same output:', this._serialOutputDevices.map(d => d.name || d.device_id));
 
-                // Query current routing (non-blocking)
-                this._queryMatrixRoutingForSerial().catch(e => console.warn('Matrix query failed:', e));
+                // Query current routing (non-blocking) and re-render when done
+                this._queryMatrixRoutingForSerial().then(() => {
+                  if (this._selectedMatrixInput) {
+                    console.log('[Matrix Query] Re-rendering after query complete');
+                    this._render();
+                  }
+                }).catch(e => console.warn('Matrix query failed:', e));
                 break;
               }
             }
@@ -384,6 +394,7 @@ class VDAIRRemoteCard extends HTMLElement {
 
       if (matrixResp.ok) {
         this._matrixDevice = await matrixResp.json();
+        console.log('Matrix device loaded:', this._matrixDevice.device_id, 'type:', matrixType);
 
         // Check if matrix has pre-defined input commands (is_input_option=true)
         const commands = this._matrixDevice.commands || {};
@@ -418,6 +429,9 @@ class VDAIRRemoteCard extends HTMLElement {
         }
 
         this._matrixInputCommands = inputCommands;
+        console.log('Matrix input commands:', this._matrixInputCommands.length, 'inputs');
+      } else {
+        console.warn('Matrix fetch failed:', matrixResp.status);
       }
 
       // _allDevices and _haDevices already loaded in _loadDeviceData - no need to fetch again
@@ -484,14 +498,26 @@ class VDAIRRemoteCard extends HTMLElement {
 
   async _queryMatrixRoutingForSerial() {
     // Query current routing for serial device's matrix output
-    if (!this._matrixDevice || !this._serialDeviceMatrixPort) return;
+    console.log('[Matrix Query] Starting query for serial device');
+    console.log('[Matrix Query] matrixDevice:', this._matrixDevice?.device_id);
+    console.log('[Matrix Query] serialDeviceMatrixPort:', this._serialDeviceMatrixPort);
+
+    if (!this._matrixDevice || !this._serialDeviceMatrixPort) {
+      console.log('[Matrix Query] Aborting - missing matrixDevice or port');
+      return;
+    }
 
     const queryTemplate = this._matrixDevice.query_template;
-    if (!queryTemplate) return;
+    console.log('[Matrix Query] queryTemplate:', queryTemplate);
+    if (!queryTemplate) {
+      console.log('[Matrix Query] Aborting - no query template');
+      return;
+    }
 
     const outputNum = this._serialDeviceMatrixPort;
     const matrixId = this._serialDeviceMatrixId;
     const queryCmd = queryTemplate.replace('{output}', outputNum);
+    console.log('[Matrix Query] Sending command:', queryCmd);
 
     try {
       const result = await VDAMatrixQueryQueue.enqueue(async () => {
@@ -502,31 +528,42 @@ class VDAIRRemoteCard extends HTMLElement {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            command: queryCmd,
-            wait_response: true,
+            payload: queryCmd,
+            format: 'text',
+            line_ending: 'cr',
+            wait_for_response: true,
             timeout: 2,
           }),
         });
 
+        console.log('[Matrix Query] Response status:', resp.status);
         if (resp.ok) {
           const data = await resp.json();
+          console.log('[Matrix Query] Response data:', data);
           return data.response;
         }
         return null;
       });
 
+      console.log('[Matrix Query] Result:', result);
       if (result) {
-        // Parse response like "av out 9 in 3"
-        const match = result.match(/av out \d+ in (\d+)/i);
-        if (match) {
-          const inputNum = match[1];
+        // Parse response - try multiple formats
+        // OREI format: "av out7 in3" or "av out 7 in 3"
+        let inputMatch = result.match(/in\s*(\d+)/i);
+        if (!inputMatch) inputMatch = result.match(/input\s*(\d+)/i);
+        if (!inputMatch) inputMatch = result.match(/(\d+)\s*$/);
+
+        console.log('[Matrix Query] Input match:', inputMatch);
+        if (inputMatch) {
+          const inputNum = inputMatch[1];
           this._selectedMatrixInput = `route_input_${inputNum}`;
+          console.log('[Matrix Query] Set selectedMatrixInput to:', this._selectedMatrixInput);
           // Load the source device based on selected input
           await this._loadSourceDeviceForSerial();
         }
       }
     } catch (e) {
-      console.warn('Failed to query matrix routing for serial device:', e);
+      console.warn('[Matrix Query] Failed:', e);
     }
   }
 
@@ -1258,6 +1295,28 @@ class VDAIRRemoteCard extends HTMLElement {
           font-size: 14px;
           font-weight: 600;
         }
+        .channel-buffer-display {
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: rgba(0, 0, 0, 0.85);
+          color: #fff;
+          font-size: 36px;
+          font-weight: bold;
+          padding: 16px 32px;
+          border-radius: 12px;
+          z-index: 9999;
+          min-width: 100px;
+          text-align: center;
+          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+          opacity: 1;
+          transition: opacity 0.3s ease;
+        }
+        .channel-buffer-display.hidden {
+          opacity: 0;
+          pointer-events: none;
+        }
         .input-row, .playback-row {
           display: flex;
           justify-content: center;
@@ -1267,6 +1326,27 @@ class VDAIRRemoteCard extends HTMLElement {
         .input-row .btn, .playback-row .btn {
           padding: 6px 8px;
           font-size: 11px;
+        }
+        /* Serial device controls */
+        .serial-controls-grid {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .control-row {
+          display: flex;
+          justify-content: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .control-row .btn {
+          padding: 10px 16px;
+          font-size: 12px;
+          min-width: 80px;
+        }
+        .control-row .btn.power {
+          background: var(--error-color, #db4437);
+          color: white;
         }
         /* Matrix input styles */
         .matrix-input-section {
@@ -1421,10 +1501,16 @@ class VDAIRRemoteCard extends HTMLElement {
                 <div class="device-name">${this._config.name || this._serialDevice.name}</div>
                 ${this._serialDevice.location ? `<div class="device-location">${this._serialDevice.location}</div>` : ''}
               </div>
-              ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
+              ${(this._serialCommands || []).some(c => c.command_id === 'power_on') ? `
                 <button class="quick-btn power compact labeled ${this._lastSent === 'power_on' ? 'sent' : ''}"
-                        data-serial-command="power_on" title="Power ${this._serialDevice.name}">
-                  ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(this._serialDevice.name)}</span>
+                        data-serial-command="power_on" title="Power On ${this._serialDevice.name}">
+                  ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(this._serialDevice.name)} On</span>
+                </button>
+              ` : ''}
+              ${(this._serialCommands || []).some(c => c.command_id === 'power_off') ? `
+                <button class="quick-btn power compact labeled ${this._lastSent === 'power_off' ? 'sent' : ''}"
+                        data-serial-command="power_off" title="Power Off ${this._serialDevice.name}">
+                  ${this._getCommandIcon('power_off')}<span class="btn-label">${this._getShortName(this._serialDevice.name)} Off</span>
                 </button>
               ` : ''}
               ${(this._serialOutputDevices || []).map(dev => {
@@ -1474,13 +1560,23 @@ class VDAIRRemoteCard extends HTMLElement {
                   </div>
 
                   <div class="remote-body">
-                    ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') ? `
+                    ${(this._serialCommands || []).some(c => c.command_id === 'power_on' || c.command_id === 'power_off') || (this._tvDevices && this._tvDevices.length > 0) ? `
                       <div class="remote-section">
-                        <div class="power-row">
-                          <button class="btn power ${this._lastSent === 'power_on' ? 'sent' : ''}"
-                                  data-serial-command="power_on">⏻ On</button>
-                          <button class="btn ${this._lastSent === 'power_off' ? 'sent' : ''}"
-                                  data-serial-command="power_off">⏻ Off</button>
+                        <div class="power-row dual-power">
+                          ${(this._serialCommands || []).some(c => c.command_id === 'power_on') ? `
+                            <button class="btn power ${this._lastSent === 'power_on' ? 'sent' : ''}"
+                                    data-serial-command="power_on">
+                              <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
+                              <span class="power-label">${this._getShortName(this._serialDevice.name)}</span>
+                            </button>
+                          ` : ''}
+                          ${(this._tvDevices || []).map(tv => `
+                            <button class="btn power tv-power ${this._lastSent === 'power_tv_' + tv.device_id ? 'sent' : ''}"
+                                    data-command="power" data-tv-device-id="${tv.device_id}">
+                              <span class="power-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg></span>
+                              <span class="power-label">${this._getShortName(tv.name)}</span>
+                            </button>
+                          `).join('')}
                         </div>
                       </div>
                     ` : ''}
@@ -1509,17 +1605,40 @@ class VDAIRRemoteCard extends HTMLElement {
                           `).join('')}
                         </div>
                       </div>
-                    ` : `
+                    ` : ''}
+
+                    <!-- Projector/Serial Device Controls -->
+                    ${(this._serialCommands || []).length > 0 ? `
                       <div class="remote-section">
-                        <div class="section-label">Device Commands</div>
-                        <div class="input-row">
-                          ${(this._serialCommands || []).filter(c => !c.command_id.startsWith('power_')).map(cmd => `
-                            <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
-                                    data-serial-command="${cmd.command_id}">${cmd.name}</button>
-                          `).join('')}
+                        <div class="section-label">${this._serialDevice.name} Controls</div>
+                        <div class="serial-controls-grid">
+                          ${(this._serialCommands || []).filter(c => c.command_id === 'power_on' || c.command_id === 'power_off').length > 0 ? `
+                            <div class="control-row">
+                              <button class="btn power ${this._lastSent === 'power_on' ? 'sent' : ''}"
+                                      data-serial-command="power_on">⏻ Power On</button>
+                              <button class="btn ${this._lastSent === 'power_off' ? 'sent' : ''}"
+                                      data-serial-command="power_off">⏻ Power Off</button>
+                            </div>
+                          ` : ''}
+                          ${(this._serialCommands || []).filter(c => c.is_input_option).length > 0 ? `
+                            <div class="control-row">
+                              ${(this._serialCommands || []).filter(c => c.is_input_option).map(cmd => `
+                                <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
+                                        data-serial-command="${cmd.command_id}">${cmd.name}</button>
+                              `).join('')}
+                            </div>
+                          ` : ''}
+                          ${(this._serialCommands || []).filter(c => !c.command_id.startsWith('power_') && !c.is_input_option && !c.is_query).length > 0 ? `
+                            <div class="control-row">
+                              ${(this._serialCommands || []).filter(c => !c.command_id.startsWith('power_') && !c.is_input_option && !c.is_query).map(cmd => `
+                                <button class="btn ${this._lastSent === cmd.command_id ? 'sent' : ''}"
+                                        data-serial-command="${cmd.command_id}">${cmd.name}</button>
+                              `).join('')}
+                            </div>
+                          ` : ''}
                         </div>
                       </div>
-                    `}
+                    ` : ''}
                   </div>
                 </div>
               </div>
@@ -1533,7 +1652,7 @@ class VDAIRRemoteCard extends HTMLElement {
                 <div class="device-name">${deviceName}</div>
                 ${this._device.location ? `<div class="device-location">${this._device.location}</div>` : ''}
               </div>
-              ${this._matrixDevice && this._matrixInputCommands.length > 0 ? `
+              ${this._matrixDevice ? `
                 ${this._commands.includes('power') ? `
                   <button class="quick-btn power compact labeled ${this._lastSent === 'power_' + this._device.device_id ? 'sent' : ''}"
                           data-command="power" data-device-id="${this._device.device_id}" title="Power ${this._device.name}">
@@ -1546,14 +1665,16 @@ class VDAIRRemoteCard extends HTMLElement {
                     ${this._getCommandIcon('power')}<span class="btn-label">${this._getShortName(tv.name)}</span>
                   </button>
                 `).join('')}
-                <select class="matrix-input-select compact" id="matrix-input-dropdown">
-                  <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
-                  ${this._matrixInputCommands.map(cmd => `
-                    <option value="${cmd.command_id}" ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}>
-                      ${this._getMatrixInputDisplayName(cmd)}
-                    </option>
-                  `).join('')}
-                </select>` : `
+                ${this._matrixInputCommands.length > 0 ? `
+                  <select class="matrix-input-select compact" id="matrix-input-dropdown">
+                    <option value="" disabled ${!this._selectedMatrixInput ? 'selected' : ''}>Input</option>
+                    ${this._matrixInputCommands.map(cmd => `
+                      <option value="${cmd.command_id}" ${this._selectedMatrixInput === cmd.command_id ? 'selected' : ''}>
+                        ${this._getMatrixInputDisplayName(cmd)}
+                      </option>
+                    `).join('')}
+                  </select>
+                ` : ''}` : `
                 ${quickButtons.map(cmd => `
                   <button class="quick-btn compact ${cmd.includes('power') ? 'power' : ''} ${this._lastSent === cmd ? 'sent' : ''}"
                           data-command="${cmd}" title="${this._formatCommand(cmd)}">
@@ -1629,11 +1750,18 @@ class VDAIRRemoteCard extends HTMLElement {
           await this._sendSerialCommand(commandId);
         });
       });
-      // Compact matrix input dropdown
+      // Compact matrix input dropdown (serial devices)
       this.shadowRoot.getElementById('serial-matrix-input-dropdown')?.addEventListener('change', async (e) => {
         const commandId = e.target.value;
         if (commandId) {
           await this._sendSerialMatrixInput(commandId);
+        }
+      });
+      // Compact matrix input dropdown (IR devices linked to matrix)
+      this.shadowRoot.getElementById('matrix-input-dropdown')?.addEventListener('change', async (e) => {
+        const commandId = e.target.value;
+        if (commandId) {
+          await this._sendMatrixCommand(commandId);
         }
       });
       // Modal matrix input buttons
@@ -1649,6 +1777,15 @@ class VDAIRRemoteCard extends HTMLElement {
           const command = btn.dataset.sourceCommand;
           if (this._sourceDevice && !this._sourceIsHADevice) {
             await this._sendCommandToDevice(command, this._sourceDevice.device_id);
+          }
+        });
+      });
+      // HA remote command buttons (for DirecTV, Apple TV, etc.)
+      this.shadowRoot.querySelectorAll('[data-ha-remote]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const command = btn.dataset.haRemote;
+          if (this._sourceDevice && this._sourceIsHADevice && this._sourceDevice.entity_id) {
+            await this._sendHARemoteCommand(command);
           }
         });
       });
@@ -1668,7 +1805,7 @@ class VDAIRRemoteCard extends HTMLElement {
               });
             } else {
               // Send power command to IR device
-              await this._hass.callService('vda_ir_control', 'send_ir_code', {
+              await this._hass.callService('vda_ir_control', 'send_command', {
                 device_id: deviceId,
                 command: 'power',
               });
@@ -1686,7 +1823,7 @@ class VDAIRRemoteCard extends HTMLElement {
           this._lastSent = 'power_tv_' + tvDeviceId;
           this._render();
           try {
-            await this._hass.callService('vda_ir_control', 'send_ir_code', {
+            await this._hass.callService('vda_ir_control', 'send_command', {
               device_id: tvDeviceId,
               command: 'power',
             });
@@ -1746,6 +1883,20 @@ class VDAIRRemoteCard extends HTMLElement {
             e.stopPropagation();
             const targetDeviceId = btn.dataset.deviceId;
             const tvDeviceId = btn.dataset.tvDeviceId;
+
+            // Check if this is a digit command (0-9) - buffer it
+            if (/^[0-9]$/.test(command) && !tvDeviceId && !targetDeviceId) {
+              // Determine target device for buffered digits
+              let bufferTarget = null;
+              if (isSource && this._sourceDevice) {
+                bufferTarget = this._sourceDevice.device_id;
+              } else if (this._sourceDevice && !['volume_up', 'volume_down', 'mute'].includes(command)) {
+                bufferTarget = this._sourceDevice.device_id;
+              }
+              this._bufferChannelDigit(command, bufferTarget);
+              return;
+            }
+
             if (tvDeviceId) {
               // Send to specific TV device (from tv_devices config)
               this._sendCommandToDevice(command, tvDeviceId);
@@ -2154,6 +2305,91 @@ class VDAIRRemoteCard extends HTMLElement {
     `;
   }
 
+  // Channel buffer methods
+  _bufferChannelDigit(digit, targetDeviceId = null) {
+    // Add digit to buffer
+    this._channelBuffer = (this._channelBuffer || '') + digit;
+    this._channelBufferTarget = targetDeviceId;
+
+    // Update visual display
+    this._updateChannelDisplay();
+
+    // Clear existing timeout
+    if (this._channelBufferTimeout) {
+      clearTimeout(this._channelBufferTimeout);
+    }
+
+    // Set new timeout to send after delay (resets each time a digit is pressed)
+    this._channelBufferTimeout = setTimeout(() => {
+      this._sendBufferedChannel();
+    }, this._channelBufferDelay || 1500);
+  }
+
+  async _sendBufferedChannel() {
+    const digits = this._channelBuffer;
+    const targetDeviceId = this._channelBufferTarget;
+    this._channelBuffer = '';
+    this._channelBufferTarget = null;
+    this._hideChannelDisplay();
+
+    if (!digits) return;
+
+    // Send each digit with delay
+    for (let i = 0; i < digits.length; i++) {
+      if (targetDeviceId) {
+        await this._sendCommandToDevice(digits[i], targetDeviceId);
+      } else {
+        await this._sendCommand(digits[i]);
+      }
+      if (i < digits.length - 1) {
+        await new Promise(r => setTimeout(r, this._channelDigitDelay || 200));
+      }
+    }
+  }
+
+  _updateChannelDisplay() {
+    // Create or update the channel display overlay
+    let display = document.getElementById('vda-channel-buffer-display');
+    if (!display) {
+      display = document.createElement('div');
+      display.id = 'vda-channel-buffer-display';
+      display.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.85);
+        color: #fff;
+        font-size: 42px;
+        font-weight: bold;
+        padding: 20px 40px;
+        border-radius: 16px;
+        z-index: 99999;
+        min-width: 120px;
+        text-align: center;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        transition: opacity 0.3s ease;
+      `;
+      document.body.appendChild(display);
+    }
+    display.textContent = this._channelBuffer;
+    display.style.opacity = '1';
+  }
+
+  _hideChannelDisplay() {
+    const display = document.getElementById('vda-channel-buffer-display');
+    if (display) {
+      display.style.opacity = '0';
+      // Remove after fade animation
+      setTimeout(() => {
+        if (display && display.style.opacity === '0') {
+          display.remove();
+        }
+      }, 300);
+    }
+  }
+
   async _sendCommand(command) {
     if (!this._device) return;
 
@@ -2216,6 +2452,37 @@ class VDAIRRemoteCard extends HTMLElement {
     }
   }
 
+  async _sendHARemoteCommand(command) {
+    if (!this._sourceDevice || !this._sourceIsHADevice || !this._sourceDevice.entity_id) return;
+
+    // Debounce - prevent rapid fire commands
+    const now = Date.now();
+    if (this._lastSendTime && now - this._lastSendTime < 150) {
+      return;
+    }
+    this._lastSendTime = now;
+
+    try {
+      await this._hass.callService('remote', 'send_command', {
+        entity_id: this._sourceDevice.entity_id,
+        command: command,
+      });
+
+      this._lastSent = command;
+      this._render();
+
+      // Clear indicator after 1s
+      setTimeout(() => {
+        if (this._lastSent === command) {
+          this._lastSent = null;
+          this._render();
+        }
+      }, 1000);
+    } catch (e) {
+      console.error('Failed to send HA remote command:', e);
+    }
+  }
+
   async _sendSerialMatrixInput(commandId) {
     // Send matrix routing command for serial device
     if (!this._matrixDevice || !this._serialDeviceMatrixPort) return;
@@ -2244,8 +2511,10 @@ class VDAIRRemoteCard extends HTMLElement {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          command: routeCmd,
-          wait_response: true,
+          payload: routeCmd,
+          format: 'text',
+          line_ending: 'cr',
+          wait_for_response: true,
           timeout: 2,
         }),
       });
@@ -2380,7 +2649,9 @@ class VDAIRRemoteCard extends HTMLElement {
       if (cmd && cmd._generated && matrixType === 'serial') {
         // Generated command for serial matrix - use routing template
         const template = this._matrixDevice.routing_template;
+        console.log('Matrix routing - template:', template, 'input:', cmd.input_value, 'output:', this._device.matrix_port);
         if (!template) {
+          console.warn('No routing_template found on matrix device');
           return;
         }
 
@@ -2529,13 +2800,84 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   _renderHADeviceRemote() {
-    // Render HA device (Apple TV, Roku, etc.) remote controls
+    // Render HA device (DirecTV, Apple TV, Roku, etc.) remote controls
     if (!this._sourceDevice || !this._sourceIsHADevice) {
       return '';
     }
 
-    // HA devices use media_player services, not IR commands
-    // Just show basic media controls
+    const deviceFamily = this._sourceDevice.device_family || '';
+    const hasRemote = !!this._sourceDevice.entity_id;
+
+    // DirecTV, Apple TV, Android TV, Fire TV - show full remote
+    if (hasRemote && ['directv', 'apple_tv', 'android_tv', 'fire_tv', 'roku'].includes(deviceFamily)) {
+      return `
+        <!-- Navigation D-Pad -->
+        <div class="remote-section">
+          <div class="dpad">
+            <div></div>
+            <button class="btn" data-ha-remote="up"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg></button>
+            <div></div>
+            <button class="btn" data-ha-remote="left"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></button>
+            <button class="btn ok" data-ha-remote="select">OK</button>
+            <button class="btn" data-ha-remote="right"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></button>
+            <div></div>
+            <button class="btn" data-ha-remote="down"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>
+            <div></div>
+          </div>
+          <div class="nav-extras">
+            <button class="btn" data-ha-remote="back">Back</button>
+            <button class="btn" data-ha-remote="menu">Menu</button>
+            ${deviceFamily === 'directv' ? `<button class="btn" data-ha-remote="guide">Guide</button>` : ''}
+            ${deviceFamily === 'directv' ? `<button class="btn" data-ha-remote="info">Info</button>` : ''}
+            ${['apple_tv', 'fire_tv', 'android_tv'].includes(deviceFamily) ? `<button class="btn" data-ha-remote="home">Home</button>` : ''}
+          </div>
+        </div>
+
+        <!-- Channel Controls (DirecTV) -->
+        ${deviceFamily === 'directv' ? `
+          <div class="remote-section">
+            <div class="vol-chan">
+              <div class="chan-group">
+                <button class="btn" data-ha-remote="channelup">Ch +</button>
+                <button class="btn" data-ha-remote="channeldown">Ch -</button>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
+        <!-- Number Pad -->
+        <div class="remote-section">
+          <div class="numpad">
+            ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', ''].map(n =>
+              n ? `<button class="btn" data-ha-remote="${n}">${n}</button>` : '<div></div>'
+            ).join('')}
+          </div>
+        </div>
+
+        <!-- Playback Controls -->
+        <div class="remote-section">
+          <div class="playback-row">
+            <button class="btn" data-ha-remote="rewind">⏪</button>
+            <button class="btn" data-ha-remote="play">▶</button>
+            <button class="btn" data-ha-remote="pause">⏸</button>
+            <button class="btn" data-ha-remote="stop">⏹</button>
+            <button class="btn" data-ha-remote="fastforward">⏩</button>
+          </div>
+        </div>
+
+        ${deviceFamily === 'directv' ? `
+          <div class="remote-section">
+            <div class="playback-row">
+              <button class="btn" data-ha-remote="record">⏺ Rec</button>
+              <button class="btn" data-ha-remote="exit">Exit</button>
+              <button class="btn" data-ha-remote="list">List</button>
+            </div>
+          </div>
+        ` : ''}
+      `;
+    }
+
+    // Basic HA media player controls for other devices
     return `
       <div class="remote-section">
         <div class="section-label">${this._sourceDevice.name}</div>
