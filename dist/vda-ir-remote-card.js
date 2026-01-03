@@ -123,6 +123,8 @@ class VDAIRRemoteCard extends HTMLElement {
     this._serialDeviceMatrixPort = null;
     // Other devices sharing the same matrix output (for power buttons)
     this._serialOutputDevices = [];
+    // Matrix sensor entity for cross-device sync
+    this._matrixSensorEntity = null;
     // Channel number buffer
     this._channelBuffer = '';
     this._channelBufferTimeout = null;
@@ -151,6 +153,28 @@ class VDAIRRemoteCard extends HTMLElement {
             oldAttrs.media_channel !== newAttrs.media_channel ||
             oldAttrs.media_series_title !== newAttrs.media_series_title) {
           this._render();
+        }
+      }
+    }
+
+    // Watch for matrix sensor state changes (cross-device sync)
+    if (this._matrixSensorEntity && oldHass) {
+      const oldState = oldHass.states[this._matrixSensorEntity];
+      const newState = hass.states[this._matrixSensorEntity];
+      if (newState && (!oldState || oldState.state !== newState.state)) {
+        const newInputNum = newState.state;
+        if (newInputNum && newInputNum !== 'unknown') {
+          const newSelectedInput = `route_input_${newInputNum}`;
+          if (this._selectedMatrixInput !== newSelectedInput) {
+            console.log('[Matrix Sync] Sensor state changed:', newInputNum, '- updating UI');
+            this._selectedMatrixInput = newSelectedInput;
+            // Load the source device for the new input
+            if (this._isSerialDevice) {
+              this._loadSourceDeviceForSerial().then(() => this._render());
+            } else {
+              this._loadSourceDevice().then(() => this._render());
+            }
+          }
         }
       }
     }
@@ -329,6 +353,13 @@ class VDAIRRemoteCard extends HTMLElement {
                   }));
                 console.log('Matrix inputs loaded:', this._matrixInputCommands.length);
 
+                // Set up sensor entity for cross-device sync
+                // Entity ID format: sensor.{matrix_name}_{output_name} with spaces->underscores, lowercase
+                const matrixName = (fullMatrix.name || matrix.device_id).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                const outputName = (outputMatch.name || `output_${outputMatch.index}`).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                this._matrixSensorEntity = `sensor.${matrixName}_${outputName}`;
+                console.log('Matrix sensor entity:', this._matrixSensorEntity);
+
                 // Find other devices sharing the same matrix output (for splitter scenarios)
                 // Check IR devices (matrix_port is stored as string, outputMatch.index is number)
                 const irDevicesOnOutput = allDevices.filter(d =>
@@ -430,6 +461,17 @@ class VDAIRRemoteCard extends HTMLElement {
 
         this._matrixInputCommands = inputCommands;
         console.log('Matrix input commands:', this._matrixInputCommands.length, 'inputs');
+
+        // Set up sensor entity for cross-device sync (IR devices)
+        if (deviceOutput) {
+          // Find output name from matrix outputs
+          const matrixOutputs = this._matrixDevice.matrix_outputs || [];
+          const outputMatch = matrixOutputs.find(o => String(o.index) === String(deviceOutput));
+          const matrixName = (this._matrixDevice.name || matrixId).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+          const outputName = (outputMatch?.name || `output_${deviceOutput}`).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+          this._matrixSensorEntity = `sensor.${matrixName}_${outputName}`;
+          console.log('Matrix sensor entity (IR):', this._matrixSensorEntity);
+        }
       } else {
         console.warn('Matrix fetch failed:', matrixResp.status);
       }
@@ -497,73 +539,20 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   async _queryMatrixRoutingForSerial() {
-    // Query current routing for serial device's matrix output
-    console.log('[Matrix Query] Starting query for serial device');
-    console.log('[Matrix Query] matrixDevice:', this._matrixDevice?.device_id);
-    console.log('[Matrix Query] serialDeviceMatrixPort:', this._serialDeviceMatrixPort);
-
-    if (!this._matrixDevice || !this._serialDeviceMatrixPort) {
-      console.log('[Matrix Query] Aborting - missing matrixDevice or port');
+    // Read routing state from HA sensor (instant, no serial query needed)
+    if (!this._matrixSensorEntity || !this._hass) {
+      console.log('[Matrix State] No sensor entity or hass');
       return;
     }
 
-    const queryTemplate = this._matrixDevice.query_template;
-    console.log('[Matrix Query] queryTemplate:', queryTemplate);
-    if (!queryTemplate) {
-      console.log('[Matrix Query] Aborting - no query template');
-      return;
-    }
+    const sensorState = this._hass.states[this._matrixSensorEntity];
+    console.log('[Matrix State] Reading sensor:', this._matrixSensorEntity, '=', sensorState?.state);
 
-    const outputNum = this._serialDeviceMatrixPort;
-    const matrixId = this._serialDeviceMatrixId;
-    const queryCmd = queryTemplate.replace('{output}', outputNum);
-    console.log('[Matrix Query] Sending command:', queryCmd);
-
-    try {
-      const result = await VDAMatrixQueryQueue.enqueue(async () => {
-        const resp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrixId)}/send`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            payload: queryCmd,
-            format: 'text',
-            line_ending: 'cr',
-            wait_for_response: true,
-            timeout: 2,
-          }),
-        });
-
-        console.log('[Matrix Query] Response status:', resp.status);
-        if (resp.ok) {
-          const data = await resp.json();
-          console.log('[Matrix Query] Response data:', data);
-          return data.response;
-        }
-        return null;
-      });
-
-      console.log('[Matrix Query] Result:', result);
-      if (result) {
-        // Parse response - try multiple formats
-        // OREI format: "av out7 in3" or "av out 7 in 3"
-        let inputMatch = result.match(/in\s*(\d+)/i);
-        if (!inputMatch) inputMatch = result.match(/input\s*(\d+)/i);
-        if (!inputMatch) inputMatch = result.match(/(\d+)\s*$/);
-
-        console.log('[Matrix Query] Input match:', inputMatch);
-        if (inputMatch) {
-          const inputNum = inputMatch[1];
-          this._selectedMatrixInput = `route_input_${inputNum}`;
-          console.log('[Matrix Query] Set selectedMatrixInput to:', this._selectedMatrixInput);
-          // Load the source device based on selected input
-          await this._loadSourceDeviceForSerial();
-        }
-      }
-    } catch (e) {
-      console.warn('[Matrix Query] Failed:', e);
+    if (sensorState && sensorState.state && sensorState.state !== 'unknown') {
+      const inputNum = sensorState.state;
+      this._selectedMatrixInput = `route_input_${inputNum}`;
+      console.log('[Matrix State] Set selectedMatrixInput to:', this._selectedMatrixInput);
+      await this._loadSourceDeviceForSerial();
     }
   }
 
@@ -610,80 +599,27 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   async _queryMatrixRouting() {
-    // Query the matrix for current routing using configured template
-    if (!this._matrixDevice || !this._device.matrix_port) return;
-
-    const matrixType = this._device.matrix_device_type;
-    if (matrixType !== 'serial') return; // Only serial matrices for now
-
-    // Use query template if configured, otherwise skip
-    const queryTemplate = this._matrixDevice.query_template;
-    if (!queryTemplate) {
+    // Read routing state from HA sensor (instant, no serial query needed)
+    if (!this._matrixSensorEntity || !this._hass) {
+      console.log('[Matrix State] No sensor entity or hass (IR device)');
       return;
     }
 
-    const outputNum = this._device.matrix_port;
-    const matrixId = this._device.matrix_device_id;
-    const cacheKey = `matrix_routing_${matrixId}_${outputNum}`;
-    const queryCmd = queryTemplate.replace('{output}', outputNum);
+    const sensorState = this._hass.states[this._matrixSensorEntity];
+    console.log('[Matrix State] Reading sensor (IR):', this._matrixSensorEntity, '=', sensorState?.state);
 
-    try {
-      // Use queue to prevent multiple cards from overwhelming serial device
-      // Don't cache - matrix state changes frequently
-      const result = await VDAMatrixQueryQueue.enqueue(async () => {
-        const resp = await fetch(`/api/vda_ir_control/serial_devices/${matrixId}/send`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            payload: queryCmd,
-            format: 'text',
-            line_ending: 'none',
-            wait_for_response: true,
-            timeout: 2.0,
-          }),
-        });
-        if (resp.ok) {
-          return await resp.json();
-        }
-        return null;
-      });
-
-      if (result) {
-        // Parse response to extract input number
-        // OREI format: "av outY inX" or "input X -> output Y" or just "X"
-        if (result && result.response) {
-          const response = String(result.response).trim();
-
-          // Try OREI format first: "av out1 in3" -> input is 3
-          let inputMatch = response.match(/in(\d+)/i);
-          // Try "input X" format
-          if (!inputMatch) inputMatch = response.match(/input\s*(\d+)/i);
-          // Try just a number at the end
-          if (!inputMatch) inputMatch = response.match(/(\d+)\s*$/);
-          // Try any number
-          if (!inputMatch) inputMatch = response.match(/(\d+)/);
-
-          if (inputMatch) {
-            const inputNum = inputMatch[1];
-            // Find the corresponding command
-            const matchingCmd = this._matrixInputCommands.find(cmd =>
-              cmd.input_value === inputNum || cmd.input_value === String(inputNum)
-            );
-            if (matchingCmd) {
-              this._selectedMatrixInput = matchingCmd.command_id;
-              // Load source device for now playing info
-              await this._loadSourceDevice();
-              // Re-render to update the dropdown
-              this._render();
-            }
-          }
-        }
+    if (sensorState && sensorState.state && sensorState.state !== 'unknown') {
+      const inputNum = sensorState.state;
+      // Find the corresponding command
+      const matchingCmd = this._matrixInputCommands.find(cmd =>
+        cmd.input_value === inputNum || cmd.input_value === String(inputNum)
+      );
+      if (matchingCmd) {
+        this._selectedMatrixInput = matchingCmd.command_id;
+        console.log('[Matrix State] Set selectedMatrixInput to:', this._selectedMatrixInput);
+        await this._loadSourceDevice();
+        this._render();
       }
-    } catch (e) {
-      console.error('Failed to query matrix routing:', e);
     }
   }
 
@@ -2484,38 +2420,27 @@ class VDAIRRemoteCard extends HTMLElement {
   }
 
   async _sendSerialMatrixInput(commandId) {
-    // Send matrix routing command for serial device
+    // Send matrix routing command for serial device via new matrix routing API
     if (!this._matrixDevice || !this._serialDeviceMatrixPort) return;
 
     const selectedCmd = this._matrixInputCommands.find(c => c.command_id === commandId);
     if (!selectedCmd) return;
 
-    const inputNum = selectedCmd.input_value;
+    const inputNum = parseInt(selectedCmd.input_value, 10);
     const outputNum = this._serialDeviceMatrixPort;
     const matrixId = this._serialDeviceMatrixId;
 
-    // Use routing template
-    const routingTemplate = this._matrixDevice.routing_template;
-    if (!routingTemplate) {
-      console.error('No routing template configured for matrix');
-      return;
-    }
-
-    const routeCmd = routingTemplate.replace('{input}', inputNum).replace('{output}', outputNum);
-
     try {
-      const resp = await fetch(`/api/vda_ir_control/serial_devices/${encodeURIComponent(matrixId)}/send`, {
+      // Use the new matrix routing API that handles template and updates sensor state
+      const resp = await fetch(`/api/vda_ir_control/matrix/${encodeURIComponent(matrixId)}/route`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          payload: routeCmd,
-          format: 'text',
-          line_ending: 'cr',
-          wait_for_response: true,
-          timeout: 2,
+          input: inputNum,
+          output: outputNum,
         }),
       });
 
@@ -2531,6 +2456,9 @@ class VDAIRRemoteCard extends HTMLElement {
             this._render();
           }
         }, 2000);
+      } else {
+        const err = await resp.json().catch(() => ({}));
+        console.error('Matrix routing failed:', err.error || resp.status);
       }
     } catch (e) {
       console.error('Failed to send matrix routing command:', e);
@@ -2647,28 +2575,28 @@ class VDAIRRemoteCard extends HTMLElement {
       const cmd = this._matrixInputCommands.find(c => c.command_id === commandId);
 
       if (cmd && cmd._generated && matrixType === 'serial') {
-        // Generated command for serial matrix - use routing template
-        const template = this._matrixDevice.routing_template;
-        console.log('Matrix routing - template:', template, 'input:', cmd.input_value, 'output:', this._device.matrix_port);
-        if (!template) {
-          console.warn('No routing_template found on matrix device');
+        // Generated command for serial matrix - use new matrix routing API
+        const inputNum = parseInt(cmd.input_value, 10);
+        const outputNum = parseInt(this._device.matrix_port, 10);
+        console.log('Matrix routing via API - input:', inputNum, 'output:', outputNum);
+
+        const resp = await fetch(`/api/vda_ir_control/matrix/${encodeURIComponent(matrixId)}/route`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this._hass.auth.data.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            input: inputNum,
+            output: outputNum,
+          }),
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          console.error('Matrix routing failed:', err.error || resp.status);
           return;
         }
-
-        const inputNum = cmd.input_value;
-        const outputNum = this._device.matrix_port;
-        // Replace placeholders in template
-        const rawCommand = template
-          .replace('{input}', inputNum)
-          .replace('{output}', outputNum);
-
-        await this._hass.callService('vda_ir_control', 'send_raw_serial_command', {
-          device_id: matrixId,
-          payload: rawCommand,
-          format: 'text',
-          line_ending: 'cr',
-          wait_for_response: false,
-        });
       } else {
         // Pre-defined command - use standard command service
         const serviceName = matrixType === 'network' ? 'send_network_command' : 'send_serial_command';
