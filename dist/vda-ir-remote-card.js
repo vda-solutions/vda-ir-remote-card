@@ -1,7 +1,7 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.9.16
+ * @version 1.9.19
  */
 
 // Global data cache - shared across all card instances to avoid duplicate API calls
@@ -638,7 +638,7 @@ class VDAIRRemoteCard extends HTMLElement {
     if (haDevice) {
       this._sourceDevice = haDevice;
       this._sourceIsHADevice = true;
-      this._sourceMediaPlayerEntity = haDevice.media_player_entity;
+      this._sourceMediaPlayerEntity = haDevice.media_player_entity_id;
       this._sourceCommands = [];
       return;
     }
@@ -1139,6 +1139,12 @@ class VDAIRRemoteCard extends HTMLElement {
           padding: 10px 0;
           border-top: 1px solid var(--divider-color, rgba(255,255,255,0.1));
           margin-top: 8px;
+        }
+        .remote-layout-new > .now-playing-compact:first-child {
+          border-top: none;
+          margin-top: 0;
+          padding-top: 0;
+          margin-bottom: 4px;
         }
         .now-playing-image-compact {
           width: 40px;
@@ -2119,6 +2125,7 @@ class VDAIRRemoteCard extends HTMLElement {
               ` : ''}
               <button class="expand-btn" id="open-serial-remote">Remote</button>
             </div>
+            ${this._renderCompactNowPlaying()}
 
             ${this._showRemote ? `
               <div class="modal-overlay" id="modal-overlay">
@@ -2160,6 +2167,7 @@ class VDAIRRemoteCard extends HTMLElement {
                       </div>
                     ` : ''}
 
+                    ${this._renderCompactNowPlaying()}
                     ${this._sourceDevice && !this._sourceIsHADevice ? this._renderSourceRemoteContent() : ''}
                     ${this._sourceDevice && this._sourceIsHADevice ? this._renderHADeviceRemote() : ''}
 
@@ -2266,6 +2274,7 @@ class VDAIRRemoteCard extends HTMLElement {
               `}
               <button class="expand-btn" id="open-remote">Remote</button>
             </div>
+            ${this._renderCompactNowPlaying()}
 
             ${this._showRemote ? `
               <div class="modal-overlay" id="modal-overlay">
@@ -2807,6 +2816,7 @@ class VDAIRRemoteCard extends HTMLElement {
 
     return `
       <div class="remote-layout-new">
+        ${this._renderCompactNowPlaying()}
         <!-- Main content area -->
         <div class="remote-main-area">
           <!-- LEFT: Power + Inputs stacked -->
@@ -3954,6 +3964,12 @@ class VDAIRRemoteCard extends HTMLElement {
     `;
   }
 
+  _escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
   _renderCompactNowPlaying() {
     const nowPlaying = this._getNowPlayingInfo();
     if (!nowPlaying) return '';
@@ -3961,11 +3977,11 @@ class VDAIRRemoteCard extends HTMLElement {
     return `
       <div class="now-playing-compact">
         ${nowPlaying.entity_picture ? `
-          <img src="${nowPlaying.entity_picture}" class="now-playing-image-compact" alt="">
+          <img src="${this._escapeHtml(nowPlaying.entity_picture)}" class="now-playing-image-compact" alt="">
         ` : ''}
         <div class="now-playing-info-compact">
-          <span class="now-playing-title-compact">${nowPlaying.media_title || ''}</span>
-          ${nowPlaying.media_channel ? `<span class="now-playing-channel-compact">${nowPlaying.media_channel}</span>` : ''}
+          <span class="now-playing-title-compact">${this._escapeHtml(nowPlaying.media_title || '')}</span>
+          ${nowPlaying.media_channel ? `<span class="now-playing-channel-compact">${this._escapeHtml(nowPlaying.media_channel)}</span>` : ''}
         </div>
       </div>
     `;
@@ -4352,3 +4368,5 @@ window.customCards.push({
   preview: true,
   documentationURL: 'https://github.com/vda-solutions/vda-ir-control',
 });
+
+console.info('%c VDA IR REMOTE CARD %c v1.9.19 ', 'color:#fff;background:#03a9f4;font-weight:700', 'color:#03a9f4;background:#222');
