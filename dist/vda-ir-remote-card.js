@@ -1,7 +1,7 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.9.17
+ * @version 1.9.18
  */
 
 // Global data cache - shared across all card instances to avoid duplicate API calls
@@ -1139,6 +1139,12 @@ class VDAIRRemoteCard extends HTMLElement {
           padding: 10px 0;
           border-top: 1px solid var(--divider-color, rgba(255,255,255,0.1));
           margin-top: 8px;
+        }
+        .remote-layout-new > .now-playing-compact:first-child {
+          border-top: none;
+          margin-top: 0;
+          padding-top: 0;
+          margin-bottom: 4px;
         }
         .now-playing-image-compact {
           width: 40px;
@@ -2808,6 +2814,7 @@ class VDAIRRemoteCard extends HTMLElement {
 
     return `
       <div class="remote-layout-new">
+        ${this._renderCompactNowPlaying()}
         <!-- Main content area -->
         <div class="remote-main-area">
           <!-- LEFT: Power + Inputs stacked -->
