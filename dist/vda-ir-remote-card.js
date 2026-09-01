@@ -1,7 +1,7 @@
 /**
  * VDA IR Remote Card
  * A custom Lovelace card for controlling IR devices
- * @version 1.9.16
+ * @version 1.9.17
  */
 
 // Global data cache - shared across all card instances to avoid duplicate API calls
@@ -638,7 +638,7 @@ class VDAIRRemoteCard extends HTMLElement {
     if (haDevice) {
       this._sourceDevice = haDevice;
       this._sourceIsHADevice = true;
-      this._sourceMediaPlayerEntity = haDevice.media_player_entity;
+      this._sourceMediaPlayerEntity = haDevice.media_player_entity_id;
       this._sourceCommands = [];
       return;
     }
@@ -2160,6 +2160,7 @@ class VDAIRRemoteCard extends HTMLElement {
                       </div>
                     ` : ''}
 
+                    ${this._renderCompactNowPlaying()}
                     ${this._sourceDevice && !this._sourceIsHADevice ? this._renderSourceRemoteContent() : ''}
                     ${this._sourceDevice && this._sourceIsHADevice ? this._renderHADeviceRemote() : ''}
 
@@ -3954,6 +3955,12 @@ class VDAIRRemoteCard extends HTMLElement {
     `;
   }
 
+  _escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
   _renderCompactNowPlaying() {
     const nowPlaying = this._getNowPlayingInfo();
     if (!nowPlaying) return '';
@@ -3961,11 +3968,11 @@ class VDAIRRemoteCard extends HTMLElement {
     return `
       <div class="now-playing-compact">
         ${nowPlaying.entity_picture ? `
-          <img src="${nowPlaying.entity_picture}" class="now-playing-image-compact" alt="">
+          <img src="${this._escapeHtml(nowPlaying.entity_picture)}" class="now-playing-image-compact" alt="">
         ` : ''}
         <div class="now-playing-info-compact">
-          <span class="now-playing-title-compact">${nowPlaying.media_title || ''}</span>
-          ${nowPlaying.media_channel ? `<span class="now-playing-channel-compact">${nowPlaying.media_channel}</span>` : ''}
+          <span class="now-playing-title-compact">${this._escapeHtml(nowPlaying.media_title || '')}</span>
+          ${nowPlaying.media_channel ? `<span class="now-playing-channel-compact">${this._escapeHtml(nowPlaying.media_channel)}</span>` : ''}
         </div>
       </div>
     `;
